@@ -342,7 +342,7 @@ async def backtest(
         non_5m = int((diffs != pd.Timedelta(minutes=5)).sum())
         warnings[str(pid)] = non_5m
 
-    # 2. Build features with groupby('patient_id') exactly as in Model/xbg1.ipynb.
+    # 2. Build features with groupby('patient_id') exactly as in Model/XGBoost.ipynb.
     # No gap segmentation, and do not reject files that contain gaps.
     df_feat = build_features(df, group_col="patient_id")
 

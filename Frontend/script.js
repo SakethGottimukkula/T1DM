@@ -2,6 +2,48 @@
 
 const API_BASE_URL = 'http://127.0.0.1:8000';
 
+/** Track whether the backend is reachable and models are loaded. */
+const apiState = {
+  connected: false,
+  modelsLoaded: 0,
+  modelsExpected: 4,
+  status: 'unknown',
+  featureColumns: [],
+};
+
+/**
+ * Check backend health and update apiState.
+ */
+async function checkBackendHealth() {
+  try {
+    const response = await fetch(`${API_BASE_URL}/health`);
+    if (!response.ok) { apiState.connected = false; apiState.status = 'offline'; return; }
+    const data = await response.json();
+    apiState.connected = true;
+    apiState.status = data.status;
+    apiState.modelsLoaded = data.models_loaded;
+    apiState.modelsExpected = data.models_expected;
+  } catch {
+    apiState.connected = false;
+    apiState.status = 'offline';
+  }
+}
+
+/**
+ * Fetch model info from /v1/models endpoint.
+ */
+async function fetchModelsInfo() {
+  try {
+    const response = await fetch(`${API_BASE_URL}/v1/models`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    apiState.featureColumns = data.feature_columns || [];
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Attempt to fetch predictions from the backend API.
  * Returns null if the API is unreachable or returns an error.
@@ -13,17 +55,34 @@ async function fetchPredictions(readings, horizon = 'all') {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ readings, horizon }),
     });
-
     if (!response.ok) {
       console.warn(`API returned ${response.status}: ${response.statusText}`);
       return null;
     }
-
     return await response.json();
   } catch (error) {
-    console.warn('Glucose Horizon API unreachable — using local demo data.', error.message);
+    console.warn('Glucose Horizon API unreachable, using local demo data.', error.message);
     return null;
   }
+}
+
+/** Render a small connection status badge in the sidebar. */
+function renderApiStatus() {
+  let el = document.getElementById('api-status');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'api-status';
+    el.style.cssText = 'padding:6px 12px;font-size:11px;display:flex;align-items:center;gap:6px;margin-top:auto;border-top:1px solid var(--line,#e1e9ed);color:var(--mute,#718391);';
+    const sidebar = document.querySelector('.side');
+    if (sidebar) sidebar.appendChild(el);
+  }
+  const dotColor = apiState.status === 'ok' ? '#218566'
+    : apiState.status === 'degraded' ? '#ba7918' : '#d35d57';
+  const label = apiState.status === 'ok' ? 'Backend connected'
+    : apiState.status === 'degraded'
+      ? `Backend degraded (${apiState.modelsLoaded}/${apiState.modelsExpected} models)`
+      : 'Backend offline';
+  el.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${dotColor};display:inline-block;"></span>${label}`;
 }
 
 const HZ = [30, 60, 90, 120];
@@ -831,6 +890,14 @@ function init() {
 
   renderAll();
   lucide.createIcons();
+
+  // Check backend health on startup and show status badge
+  checkBackendHealth().then(() => {
+    renderApiStatus();
+    if (apiState.connected) {
+      fetchModelsInfo();
+    }
+  });
 }
 
 document.addEventListener('DOMContentLoaded', init);
