@@ -1,0 +1,3 @@
+# This directory holds trained model files (*.json).
+# Run `python scripts/train_models.py --train <csv>` to populate it.
+# These files are gitignored.

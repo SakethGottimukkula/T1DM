@@ -1,5 +1,31 @@
 /* Demo / research prototype using CGM-only OhioT1DM 2020 replay data. */
 
+const API_BASE_URL = 'http://127.0.0.1:8000';
+
+/**
+ * Attempt to fetch predictions from the backend API.
+ * Returns null if the API is unreachable or returns an error.
+ */
+async function fetchPredictions(readings, horizon = 'all') {
+  try {
+    const response = await fetch(`${API_BASE_URL}/v1/predict`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ readings, horizon }),
+    });
+
+    if (!response.ok) {
+      console.warn(`API returned ${response.status}: ${response.statusText}`);
+      return null;
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.warn('Glucose Horizon API unreachable — using local demo data.', error.message);
+    return null;
+  }
+}
+
 const HZ = [30, 60, 90, 120];
 const PATIENTS = ['559', '563', '570', '575', '588', '591'];
 const RMSE = { 30: 20.94, 60: 33.67, 90: 42.44, 120: 48.08 };
@@ -613,10 +639,37 @@ function runForecast() {
   const resultsBox = selectElement('#results');
   resultsBox.classList.add('loading');
 
-  setTimeout(() => {
+  const currentCase = getCurrentCase();
+
+  // Build readings from the history portion of the curve (x <= 0)
+  const historyPoints = currentCase.curve.filter(point => point.x <= 0);
+  const baseDate = new Date('2020-01-15T12:00:00');
+  const readings = historyPoints.map(point => {
+    const ts = new Date(baseDate.getTime() + point.x * 60000);
+    return {
+      timestamp: ts.toISOString(),
+      glucose: Math.max(40, Math.min(400, point.y)),
+    };
+  });
+
+  fetchPredictions(readings, 'all').then(apiResult => {
+    if (apiResult && apiResult.predictions) {
+      // Update the case predictions with API results
+      apiResult.predictions.forEach(pred => {
+        const hz = pred.horizon;
+        if (currentCase.preds[hz]) {
+          currentCase.preds[hz].pred = Math.round(pred.predicted_glucose);
+          currentCase.preds[hz].err = Math.abs(
+            currentCase.preds[hz].pred - currentCase.preds[hz].actual
+          );
+        }
+      });
+    }
+    // If apiResult is null the local demo data is already in place (graceful fallback)
+
     resultsBox.classList.remove('loading');
     renderAll();
-  }, 450);
+  });
 }
 
 function init() {
