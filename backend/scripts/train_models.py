@@ -88,7 +88,7 @@ def main() -> None:
     for hz in HORIZONS:
         target_col = f"target_{hz}"
         print(f"\nTraining {hz}-min model ...")
-        model = XGBRegressor()
+        model = XGBRegressor(random_state=0)
         model.fit(X_train, df_train[target_col])
         model_path = out_dir / f"model_{hz}.json"
         model.save_model(str(model_path))
@@ -125,6 +125,15 @@ def main() -> None:
             print(
                 f"  {hz:>3d} min  |  RMSE {rmse:6.2f}  |  MAE {mae:6.2f}  "
                 f"|  Clarke A+B {ab_pct:.2f}%"
+            )
+            a_pct = counts["A"] / total * 100 if total else 0
+            b_pct = counts["B"] / total * 100 if total else 0
+            c_pct = counts["C"] / total * 100 if total else 0
+            d_pct = counts["D"] / total * 100 if total else 0
+            e_pct = counts["E"] / total * 100 if total else 0
+            print(
+                f"         Zones: A={a_pct:.2f}%, B={b_pct:.2f}%, C={c_pct:.2f}%, "
+                f"D={d_pct:.2f}%, E={e_pct:.2f}%  |  Rows: train={len(X_train)}, test={len(X_test)}"
             )
 
     print("\nDone.")
