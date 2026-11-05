@@ -3,6 +3,7 @@
 
 # Trained models (regenerate via train_models.py)
 backend/models/*.json
+!backend/models/metrics.json
 
 # Python
 __pycache__/

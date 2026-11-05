@@ -93,13 +93,13 @@ def main() -> None:
         model_path = out_dir / f"model_{hz}.json"
         model.save_model(str(model_path))
         models[hz] = model
-        print(f"  Saved → {model_path}")
+        print(f"  Saved -> {model_path}")
 
     # Save feature column list
     fc_path = out_dir / "feature_columns.json"
     with open(fc_path, "w") as f:
         json.dump(FEATURE_COLUMNS, f, indent=2)
-    print(f"\nFeature columns → {fc_path}")
+    print(f"\nFeature columns -> {fc_path}")
 
     # ------------------------------------------------------------------
     # Optional evaluation on test set
