@@ -16,6 +16,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from .config import CORS_ORIGINS, GLUCOSE_MAX, GLUCOSE_MIN, HORIZONS, MIN_HISTORY
 from .ega import classify_array
 from .features import FEATURE_COLUMNS, build_features, build_features_single
+from .timeutil import parse_timestamps
 from .predictor import ModelStore
 from .schemas import (
     BacktestResponse,
@@ -101,19 +102,13 @@ def _validate_readings_df(df: pd.DataFrame) -> None:
             f"Found {len(oob)} out-of-range value(s).",
         )
 
+    # Duplicate timestamps anywhere in the input
+    if df["timestamp"].duplicated().any():
+        raise HTTPException(422, "Timestamps must be unique.")
+
     # Timestamps must be strictly increasing
     if not df["timestamp"].is_monotonic_increasing:
         raise HTTPException(422, "Timestamps must be strictly increasing.")
-
-    # Roughly 5-minute spacing: allow 3–7 min gaps
-    if len(df) >= 2:
-        diffs = df["timestamp"].diff().dropna().dt.total_seconds()
-        bad = diffs[(diffs < 180) | (diffs > 420)]
-        if not bad.empty:
-            raise HTTPException(
-                422,
-                f"Timestamps should be ~5 minutes apart. Found {len(bad)} gap(s) outside 3–7 min.",
-            )
 
     # Minimum history
     if len(df) < MIN_HISTORY:
@@ -121,6 +116,17 @@ def _validate_readings_df(df: pd.DataFrame) -> None:
             422,
             f"At least {MIN_HISTORY} readings required (largest rolling window = 24 rows). "
             f"Got {len(df)}.",
+        )
+
+    # Only the LAST MIN_HISTORY readings must be continuous (~5-minute spacing: allow 3–7 min gaps)
+    last_window = df.iloc[-MIN_HISTORY:]
+    diffs = last_window["timestamp"].diff().dropna().dt.total_seconds()
+    bad = diffs[(diffs < 180) | (diffs > 420)]
+    if not bad.empty:
+        raise HTTPException(
+            422,
+            f"Timestamps should be ~5 minutes apart. Found {len(bad)} gap(s) outside 3–7 min. "
+            f"Only the most recent {MIN_HISTORY} readings (2 hours) are checked.",
         )
 
 
@@ -198,7 +204,10 @@ def predict(req: PredictRequest) -> PredictResponse:
     # Build DataFrame from readings
     rows = [{"timestamp": r.timestamp, "glucose": r.glucose} for r in req.readings]
     df = pd.DataFrame(rows)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
+    try:
+        df["timestamp"] = parse_timestamps(df["timestamp"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     _validate_readings_df(df)
@@ -216,7 +225,7 @@ def predict(req: PredictRequest) -> PredictResponse:
 
     features_row = {col: float(last[col]) for col in FEATURE_COLUMNS}
     latest_glucose = float(last["glucose"])
-    ts = str(last["timestamp"])
+    ts = last["timestamp"].isoformat()
 
     # Determine horizons
     if req.horizon == "all":
@@ -237,6 +246,7 @@ def predict(req: PredictRequest) -> PredictResponse:
 async def predict_csv(
     file: UploadFile = File(...),
     horizon: str = Form(default="all"),
+    patient_id: str | None = Form(default=None),
 ) -> PredictResponse:
     store = get_store()
 
@@ -262,18 +272,40 @@ async def predict_csv(
     if "timestamp" not in df.columns or "glucose" not in df.columns:
         raise HTTPException(422, "CSV must contain 'timestamp' and 'glucose' columns.")
 
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"], format="%d-%m-%Y %H:%M:%S"
-    )
+    try:
+        df["timestamp"] = parse_timestamps(df["timestamp"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+    # Patient selection
+    if "patient_id" in df.columns:
+        unique_pids = [str(p) for p in df["patient_id"].unique()]
+        pid_str = str(patient_id) if patient_id is not None and str(patient_id).strip() != "" else None
+
+        if len(unique_pids) == 1:
+            single_pid = unique_pids[0]
+            if pid_str is not None and pid_str != single_pid:
+                raise HTTPException(
+                    422,
+                    f"Patient '{patient_id}' not found. Available patient IDs: {unique_pids[:20]}.",
+                )
+            df = df[df["patient_id"].astype(str) == single_pid]
+        elif len(unique_pids) > 1:
+            if pid_str is None:
+                raise HTTPException(
+                    422,
+                    f"Multiple patients found in CSV: {unique_pids[:20]}. Please specify 'patient_id'.",
+                )
+            if pid_str not in unique_pids:
+                raise HTTPException(
+                    422,
+                    f"Patient '{patient_id}' not found. Available patient IDs: {unique_pids[:20]}.",
+                )
+            df = df[df["patient_id"].astype(str) == pid_str]
+
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     _validate_readings_df(df)
-
-    # If there is a patient_id column, use only the last patient's data
-    # (for simplicity; the API is single-patient anyway)
-    if "patient_id" in df.columns:
-        pid = df["patient_id"].iloc[-1]
-        df = df[df["patient_id"] == pid].reset_index(drop=True)
 
     df = build_features_single(df)
     last = df.iloc[-1]
@@ -286,7 +318,7 @@ async def predict_csv(
 
     features_row = {col: float(last[col]) for col in FEATURE_COLUMNS}
     latest_glucose = float(last["glucose"])
-    ts = str(last["timestamp"])
+    ts = last["timestamp"].isoformat()
 
     preds = _predict_horizons(store, features_row, latest_glucose, horizons)
 
@@ -304,18 +336,18 @@ async def backtest(
 ) -> BacktestResponse:
     store = get_store()
 
+    # 1. Horizon valid (422)
     if horizon not in HORIZONS:
         raise HTTPException(422, "horizon must be 30, 60, 90, or 120")
-    if not store.is_loaded(horizon):
-        raise HTTPException(503, f"Model for {horizon}-min horizon is not loaded.")
 
-    # Read CSV
+    # 2. Read and parse CSV (422)
     content = await file.read()
     try:
         df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
         raise HTTPException(422, f"Could not parse CSV: {exc}")
 
+    # 3. Required columns (422)
     required_cols = {"timestamp", "glucose", "patient_id"}
     if not required_cols.issubset(df.columns):
         raise HTTPException(
@@ -323,14 +355,15 @@ async def backtest(
             f"CSV must contain 'timestamp', 'glucose', and 'patient_id' columns. Got: {list(df.columns)}",
         )
 
+    # 4. Timestamps parse (422)
     try:
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"], format="%d-%m-%Y %H:%M:%S"
-        )
-    except Exception as exc:
-        raise HTTPException(
-            422, f"Error parsing timestamp with format '%d-%m-%Y %H:%M:%S': {exc}"
-        )
+        df["timestamp"] = parse_timestamps(df["timestamp"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+    # 5. Model loaded check (503)
+    if not store.is_loaded(horizon):
+        raise HTTPException(503, f"Model for {horizon}-min horizon is not loaded.")
 
     # 1. Sort by patient_id, then timestamp
     df = df.sort_values(["patient_id", "timestamp"]).reset_index(drop=True)
@@ -380,7 +413,7 @@ async def backtest(
     # Arrays timestamps/actual/predicted capped at 2000 points for plotting
     max_plot_points = 2000
     plot_df = df_valid.iloc[:max_plot_points]
-    timestamps_arr = [str(ts) for ts in plot_df["timestamp"]]
+    timestamps_arr = [ts.isoformat() for ts in plot_df["timestamp"]]
     actual_arr = [round(float(v), 2) for v in actuals[:max_plot_points]]
     predicted_arr = [round(float(v), 2) for v in preds[:max_plot_points]]
 

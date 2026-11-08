@@ -118,6 +118,16 @@ curl -X POST http://127.0.0.1:8000/v1/backtest \
   -F "horizon=30"
 ```
 
+## Timestamps and gap policy
+
+- **Accepted formats**: ISO 8601 (e.g. `YYYY-MM-DDTHH:MM:SS`) and Day-first (`DD-MM-YYYY HH:MM:SS`).
+- **Offsets**: Any UTC offset or `Z` suffix is ignored; written wall-clock time is used directly.
+- **Output**: Predictions and backtests return timestamps in ISO 8601 format without timezone.
+- **Duplicate timestamps**: Rejected with HTTP 422 (`Timestamps must be unique.`).
+- **Gap policy for predict**: Only the last 24 readings (2 hours) must be continuous (3–7 min spacing); gaps before this window are ignored.
+- **Patient selection (/v1/predict/csv)**: Optional `patient_id` form field selects a specific patient from multi-patient CSVs.
+- **Backtest behaviour**: `/v1/backtest` only logs non-5-minute gaps as warnings and computes features by row position without rejection.
+
 ## Environment Variables
 
 | Variable | Default | Description |

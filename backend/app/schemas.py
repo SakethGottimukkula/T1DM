@@ -19,7 +19,7 @@ class GlucoseReading(BaseModel):
 
     timestamp: str = Field(
         ...,
-        description="ISO 8601 timestamp, e.g. '2020-01-15T07:35:00'",
+        description="ISO 8601 or DD-MM-YYYY HH:MM:SS timestamp (e.g. '2020-01-15T07:35:00' or '15-01-2020 07:35:00'). UTC offsets are ignored (wall-clock time is used).",
     )
     glucose: float = Field(
         ...,
