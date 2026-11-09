@@ -11,11 +11,10 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-
 from .config import CORS_ORIGINS, GLUCOSE_MAX, GLUCOSE_MIN, HORIZONS, MIN_HISTORY
-from .ega import classify_array
+from .ega import classify_point
 from .features import FEATURE_COLUMNS, build_features, build_features_single
+from .metrics import summarize
 from .timeutil import parse_timestamps
 from .predictor import ModelStore
 from .schemas import (
@@ -333,12 +332,15 @@ async def predict_csv(
 async def backtest(
     file: UploadFile = File(...),
     horizon: int = Form(...),
+    max_points: int = Form(default=2000),
 ) -> BacktestResponse:
     store = get_store()
 
-    # 1. Horizon valid (422)
+    # 1. Horizon & max_points valid (422)
     if horizon not in HORIZONS:
         raise HTTPException(422, "horizon must be 30, 60, 90, or 120")
+    if max_points < 50 or max_points > 5000:
+        raise HTTPException(422, "max_points must be between 50 and 5000")
 
     # 2. Read and parse CSV (422)
     content = await file.read()
@@ -346,6 +348,8 @@ async def backtest(
         df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
         raise HTTPException(422, f"Could not parse CSV: {exc}")
+
+    n_rows_raw = len(df)
 
     # 3. Required columns (422)
     required_cols = {"timestamp", "glucose", "patient_id"}
@@ -376,61 +380,66 @@ async def backtest(
         warnings[str(pid)] = non_5m
 
     # 2. Build features with groupby('patient_id') exactly as in Model/XGBoost.ipynb.
-    # No gap segmentation, and do not reject files that contain gaps.
     df_feat = build_features(df, group_col="patient_id")
 
-    # 3. Drop rows with NaN features or target
-    target_col = f"target_{horizon}"
-    valid_cols = FEATURE_COLUMNS + [target_col]
+    # 3. Canonical row selection: dropna on FEATURE_COLUMNS + all four targets
+    target_cols = [f"target_{h}" for h in HORIZONS]
+    valid_cols = FEATURE_COLUMNS + target_cols
     df_valid = df_feat.dropna(subset=valid_cols).reset_index(drop=True)
 
     if len(df_valid) == 0:
         raise HTTPException(422, "No rows with enough history and valid targets.")
 
-    # 4. Predict every remaining row with the model for that horizon and compare against the true glucose at t+horizon
-    X = df_valid[FEATURE_COLUMNS].values
-    model = store._models[horizon]  # type: ignore[attr-defined]
-    preds = model.predict(X)
-    actuals = df_valid[target_col].values
+    # 4. Predict using store.predict_batch
+    target_col = f"target_{horizon}"
+    actuals = df_valid[target_col].to_numpy(dtype=float)
+    preds = store.predict_batch(df_valid[FEATURE_COLUMNS], horizon)
 
-    # Metrics
-    rmse = float(np.sqrt(mean_squared_error(actuals, preds)))
-    mae = float(mean_absolute_error(actuals, preds))
+    # 5. Metrics via summarize()
+    overall = summarize(actuals, preds)
 
-    # Clarke EGA
-    _, zone_counts = classify_array(actuals.tolist(), preds.tolist())
-    n_rows = len(df_valid)
-    zone_percentages = {
-        z: round((zone_counts[z] / n_rows) * 100, 2) if n_rows else 0.0
-        for z in ["A", "B", "C", "D", "E"]
-    }
-    a_plus_b_pct = (
-        round(((zone_counts["A"] + zone_counts["B"]) / n_rows) * 100, 2)
-        if n_rows
-        else 0.0
-    )
+    per_patient: dict[str, dict] = {}
+    for pid in df_valid["patient_id"].unique():
+        p_mask = (df_valid["patient_id"] == pid).to_numpy()
+        p_actuals = actuals[p_mask]
+        p_preds = preds[p_mask]
+        per_patient[str(pid)] = summarize(p_actuals, p_preds)
 
-    # Arrays timestamps/actual/predicted capped at 2000 points for plotting
-    max_plot_points = 2000
-    plot_df = df_valid.iloc[:max_plot_points]
-    timestamps_arr = [ts.isoformat() for ts in plot_df["timestamp"]]
-    actual_arr = [round(float(v), 2) for v in actuals[:max_plot_points]]
-    predicted_arr = [round(float(v), 2) for v in preds[:max_plot_points]]
+    # 6. Plot sampling: at most max_points rows
+    n = len(df_valid)
+    if n <= max_points:
+        indices = np.arange(n)
+    else:
+        indices = np.unique(np.round(np.linspace(0, n - 1, max_points)).astype(int))
+
+    timestamps_arr = [df_valid["timestamp"].iloc[i].isoformat() for i in indices]
+    actual_arr = [round(float(actuals[i]), 2) for i in indices]
+    predicted_arr = [round(float(preds[i]), 2) for i in indices]
+    patient_ids_arr = [
+        int(p) if isinstance(p, (int, np.integer)) or (isinstance(p, str) and p.isdigit()) else str(p)
+        for p in df_valid["patient_id"].iloc[indices]
+    ]
+    zones_arr = [classify_point(float(actuals[i]), float(preds[i])) for i in indices]
 
     return BacktestResponse(
-        n_rows=n_rows,
-        rmse=round(rmse, 2),
-        mae=round(mae, 2),
-        zone_counts=zone_counts,
-        zone_percentages=zone_percentages,
-        clarke_zone_counts=zone_counts,
-        clarke_zone_percentages=zone_percentages,
-        clarke_zones={"counts": zone_counts, "percentages": zone_percentages},
-        a_plus_b_pct=a_plus_b_pct,
-        clarke_ab_pct=a_plus_b_pct,
+        n_rows=overall["n_rows"],
+        rmse=overall["rmse"],
+        mae=overall["mae"],
+        zone_counts=overall["zone_counts"],
+        zone_percentages=overall["zone_percentages"],
+        clarke_zone_counts=overall["zone_counts"],
+        clarke_zone_percentages=overall["zone_percentages"],
+        clarke_zones={"counts": overall["zone_counts"], "percentages": overall["zone_percentages"]},
+        a_plus_b_pct=overall["a_plus_b_pct"],
+        clarke_ab_pct=overall["a_plus_b_pct"],
         warnings=warnings,
         timestamps=timestamps_arr,
         actual=actual_arr,
         predicted=predicted_arr,
         horizon=horizon,
+        n_rows_raw=n_rows_raw,
+        evaluation_rule="rows where all 18 features and all 4 targets are non-null (identical to Model/XGBoost.ipynb)",
+        per_patient=per_patient,
+        patient_ids=patient_ids_arr,
+        zones=zones_arr,
     )

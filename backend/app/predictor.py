@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import xgboost as xgb
 
 from .config import HORIZONS, MODEL_DIR
@@ -99,3 +100,26 @@ class ModelStore:
         row = np.array([[features[col] for col in self._feature_columns]])
         pred = self._models[horizon].predict(row)
         return float(pred[0])
+
+
+    def predict_batch(self, X: pd.DataFrame, horizon: int) -> np.ndarray:
+        """Return predictions for a batch of feature rows for the given horizon.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            DataFrame containing the 18 feature columns in FEATURE_COLUMNS order.
+        horizon : int
+            One of 30, 60, 90, 120.
+
+        Returns
+        -------
+        np.ndarray
+            Array of predicted glucose values in mg/dL.
+        """
+        if horizon not in self._models:
+            raise RuntimeError(f"Model for {horizon}-min horizon is not loaded")
+
+        features_df = X[self._feature_columns]
+        preds = self._models[horizon].predict(features_df)
+        return np.asarray(preds, dtype=float)

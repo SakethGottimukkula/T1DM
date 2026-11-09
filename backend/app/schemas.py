@@ -113,6 +113,11 @@ class BacktestResponse(BaseModel):
     predicted: list[float]
     horizon: int | None = None
     clarke_ab_pct: float | None = None
+    n_rows_raw: int
+    evaluation_rule: str
+    per_patient: dict[str, dict]
+    patient_ids: list[int | str]
+    zones: list[str]
 
 
 class ModelInfo(BaseModel):

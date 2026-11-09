@@ -115,8 +115,14 @@ curl -X POST http://127.0.0.1:8000/v1/predict/csv \
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/backtest \
   -F "file=@path/to/ohio_testing_combined.csv" \
-  -F "horizon=30"
+  -F "horizon=30" \
+  -F "max_points=2000"
 ```
+
+- **Evaluation rule**: Evaluates only rows where all 18 features and all four targets (30, 60, 90, 120 min) are non-null ($N - 47$ rows per patient). The exact same evaluated row set is used across all four horizons.
+- **Parameters**: `file` (CSV with `timestamp`, `glucose`, `patient_id`), `horizon` (30, 60, 90, or 120), `max_points` (optional int, default 2000, 50..5000).
+- **Plot sampling**: When evaluated rows $N > \text{max\_points}$, samples at most `max_points` evenly spaced rows via deterministic `np.linspace(0, n - 1, max_points)` rounded and de-duplicated. If $N \le \text{max\_points}$, all evaluated rows are returned.
+- **Response fields**: Includes overall metrics (`n_rows`, `rmse`, `mae`, `zone_counts`, `zone_percentages`, `a_plus_b_pct`), `n_rows_raw`, `evaluation_rule`, `per_patient` (per-patient metric breakdown), and parallel plotted arrays capped at `max_points` (`timestamps`, `actual`, `predicted`, `patient_ids`, `zones`).
 
 ## Timestamps and gap policy
 
