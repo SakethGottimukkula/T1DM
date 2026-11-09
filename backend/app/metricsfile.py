@@ -8,6 +8,10 @@ from typing import Any
 
 from .config import HORIZONS
 
+WARNING_MARKER_NOT_LOADED = "not loaded"
+WARNING_MARKER_HASH_MISMATCH = "scripts/evaluate.py"
+WARNING_MARKER_FEATURE_MISMATCH = "feature_columns in metrics.json does not match model feature columns"
+
 _cache: dict[str, Any] = {
     "path": None,
     "mtime": None,
@@ -89,13 +93,13 @@ def check_consistency(metrics: dict[str, Any] | None, store: Any) -> list[str]:
             actual_sha = store.model_sha256(hz)
             if actual_sha is None or expected_sha is None or actual_sha.lower() != expected_sha.lower():
                 warnings.append(
-                    f"Model for horizon {hz} differs from metrics.json (metrics.json was generated for different model files and scripts/evaluate.py should be re-run)."
+                    f"Model for horizon {hz} differs from metrics.json (metrics.json was generated for different model files and {WARNING_MARKER_HASH_MISMATCH} should be re-run)."
                 )
         else:
-            warnings.append(f"model for horizon {hz} is not loaded")
+            warnings.append(f"model for horizon {hz} is {WARNING_MARKER_NOT_LOADED}")
 
     if metrics.get("feature_columns") != store.feature_columns:
-        warnings.append("feature_columns in metrics.json does not match model feature columns")
+        warnings.append(WARNING_MARKER_FEATURE_MISMATCH)
 
     return warnings
 
@@ -109,10 +113,13 @@ def overall_status(
     if load_status != "ok":
         return load_status
 
-    if any("scripts/evaluate.py" in w for w in warnings):
+    if any(WARNING_MARKER_NOT_LOADED in w for w in warnings):
+        return "models_not_loaded"
+
+    if any(WARNING_MARKER_HASH_MISMATCH in w for w in warnings):
         return "model_mismatch"
 
-    if any("feature_columns" in w for w in warnings):
+    if any(WARNING_MARKER_FEATURE_MISMATCH in w for w in warnings):
         return "feature_mismatch"
 
     return "ok"

@@ -140,3 +140,24 @@ def test_model_not_loaded_warning(tmp_path: Path):
 
     warnings = check_consistency(metrics, store)
     assert any("120" in w and "not loaded" in w for w in warnings)
+    assert overall_status(load_status, warnings, metrics) == "models_not_loaded"
+
+
+def test_models_not_loaded_precedence_over_hash_mismatch(tmp_path: Path):
+    # Horizon 120 is not loaded, and horizon 30 has a hash mismatch
+    store = FakeStore(loaded_horizons=(30, 60, 90))
+    data = _make_valid_metrics_dict(store)
+    data["models"]["30"]["sha256"] = "different_hash_for_horizon_30"
+    file_path = tmp_path / "metrics.json"
+    file_path.write_text(json.dumps(data), encoding="utf-8")
+
+    metrics, load_status = load_metrics(file_path)
+    assert load_status == "ok"
+
+    warnings = check_consistency(metrics, store)
+    # Both warnings are present
+    assert any("120" in w and "not loaded" in w for w in warnings)
+    assert any("30" in w and "scripts/evaluate.py" in w for w in warnings)
+    # But status precedence dictates models_not_loaded
+    assert overall_status(load_status, warnings, metrics) == "models_not_loaded"
+

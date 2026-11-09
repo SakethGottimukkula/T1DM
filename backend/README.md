@@ -67,7 +67,7 @@ curl http://127.0.0.1:8000/v1/models
 ```
 
 - **Model file information**: Each model in `models` includes `sha256` (SHA-256 hash in lowercase hex) and `size_bytes` (file size in bytes), or null if not loaded.
-- **Metrics consistency**: `metrics_status` reports consistency between loaded models and `metrics.json` (`ok`, `model_mismatch`, `feature_mismatch`, `missing`, `unreadable`, or `unsupported_schema`).
+- **Metrics consistency**: `metrics_status` reports consistency between loaded models and `metrics.json` (`ok`, `models_not_loaded`, `model_mismatch`, `feature_mismatch`, `missing`, `unreadable`, or `unsupported_schema`).
 - **Warnings & importance**: `metrics_warnings` lists human-readable discrepancy descriptions, and `feature_importance` contains the full feature importance block from `metrics.json` (or null if missing).
 
 ### `GET /v1/metrics`
@@ -77,7 +77,7 @@ curl http://127.0.0.1:8000/v1/metrics
 ```
 
 - **Response**: Returns `{status, warnings, metrics}` with the full contents of `metrics.json`.
-- **Status values**: `ok` (hashes and features match), `model_mismatch` (model hash differs from `metrics.json`), `feature_mismatch` (feature columns differ), `missing` (file not found), `unreadable` (invalid JSON/non-object), `unsupported_schema` (schema_version != 1).
+- **Status values**: `ok` (hashes and features match), `models_not_loaded` (one or more horizon models not loaded), `model_mismatch` (model hash differs from `metrics.json`), `feature_mismatch` (feature columns differ), `missing` (file not found), `unreadable` (invalid JSON/non-object), `unsupported_schema` (schema_version != 1).
 - **Error handling**: Returns HTTP 503 if `metrics.json` cannot be loaded (`missing`, `unreadable`, or `unsupported_schema`), advising to run `python scripts/evaluate.py`.
 
 ### `POST /v1/predict`
@@ -150,10 +150,48 @@ curl -X POST http://127.0.0.1:8000/v1/backtest \
   -F "max_points=2000"
 ```
 
+Running backtest without file upload (using server-configured `TEST_CSV_PATH`):
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/backtest \
+  -F "horizon=30" \
+  -F "max_points=2000"
+```
+
 - **Evaluation rule**: Evaluates only rows where all 18 features and all four targets (30, 60, 90, 120 min) are non-null ($N - 47$ rows per patient). The exact same evaluated row set is used across all four horizons.
-- **Parameters**: `file` (CSV with `timestamp`, `glucose`, `patient_id`), `horizon` (30, 60, 90, or 120), `max_points` (optional int, default 2000, 50..5000).
+- **Parameters**:
+  - `file`: Optional uploaded CSV with `timestamp`, `glucose`, `patient_id`. If omitted, server falls back to `TEST_CSV_PATH`. Returns HTTP 422 if neither is provided.
+  - `horizon`: Forecast horizon (30, 60, 90, or 120).
+  - `max_points`: Optional int, default 2000 (range 50..5000).
 - **Plot sampling**: When evaluated rows $N > \text{max\_points}$, samples at most `max_points` evenly spaced rows via deterministic `np.linspace(0, n - 1, max_points)` rounded and de-duplicated. If $N \le \text{max\_points}$, all evaluated rows are returned.
-- **Response fields**: Includes overall metrics (`n_rows`, `rmse`, `mae`, `zone_counts`, `zone_percentages`, `a_plus_b_pct`), `n_rows_raw`, `evaluation_rule`, `per_patient` (per-patient metric breakdown), and parallel plotted arrays capped at `max_points` (`timestamps`, `actual`, `predicted`, `patient_ids`, `zones`).
+- **Response fields**: Includes overall metrics (`n_rows`, `rmse`, `mae`, `zone_counts`, `zone_percentages`, `a_plus_b_pct`), `n_rows_raw`, `evaluation_rule`, `per_patient` (per-patient metric breakdown), `data_source` (`"upload"` or `"server"`), and parallel plotted arrays capped at `max_points` (`timestamps`, `actual`, `predicted`, `patient_ids`, `zones`).
+
+### `GET /v1/cases`
+
+```bash
+curl http://127.0.0.1:8000/v1/cases?per_patient=3
+```
+
+- **Query parameters**: `per_patient` (optional int, default 3, range 1–10).
+- **Eligibility criteria**: A reading at index $i$ is eligible as a test case if and only if it has:
+  - At least 36 historical readings ($i-36 \ge 0$, spanning 3 hours),
+  - At least 24 future readings ($i+24 \le n-1$, spanning 2 hours),
+  - All 60 consecutive reading intervals between index $i-36$ and $i+24$ are strictly between 3 and 7 minutes (180s to 420s).
+- **Case selection**: Deterministically selects up to `per_patient` eligible cases per patient evenly spaced across their eligible readings via linear interpolation.
+- **Response**: Returns `data_source` summary (`configured`, `file_name`, `status`, `total_readings`, `total_patients`, `total_eligible_cases`), per-patient statistics (`n_readings`, `n_eligible_cases`, `first_timestamp`, `last_timestamp`), and a list of `cases` with `case_id`, `patient_id`, `timestamp`, and `glucose`. Returns HTTP 503 if server test data is not configured or missing.
+
+### `GET /v1/cases/{case_id}`
+
+```bash
+curl http://127.0.0.1:8000/v1/cases/101-20220115T120000
+```
+
+- **Path parameters**: `case_id` formatted as `{patient_id}-{timestamp:%Y%m%dT%H%M%S}`.
+- **Response**: Returns full case context including:
+  - `history`: 37 readings ($i-36$ to $i$ inclusive, representing 3 hours of CGM history up to the decision point),
+  - `future`: 24 readings ($i+1$ to $i+24$ inclusive, representing 2 hours of actual subsequent CGM observations),
+  - `actual_at`: Ground truth glucose values at each model horizon (`"30"`, `"60"`, `"90"`, `"120"`).
+- **Errors**: Returns HTTP 404 if the case ID does not match any eligible case. Returns HTTP 503 if server test data is not configured.
 
 ## Timestamps and gap policy
 
@@ -172,6 +210,25 @@ curl -X POST http://127.0.0.1:8000/v1/backtest \
 | `MODEL_DIR` | `backend/models` | Directory containing model `.json` files |
 | `CORS_ORIGINS` | `http://127.0.0.1:5500,http://localhost:5500` | Comma-separated CORS origins |
 | `TRAIN_CSV` | — | Alternative to `--train` CLI arg |
+| `TEST_CSV_PATH` | — | Path to server-side test dataset CSV (e.g. ohio_testing_combined.csv) |
+
+### Setting `TEST_CSV_PATH`
+
+PowerShell:
+```powershell
+$env:TEST_CSV_PATH = "C:\path\to\ohio_testing_combined.csv"
+uvicorn app.main:app --reload
+```
+
+Bash / macOS / Linux:
+```bash
+export TEST_CSV_PATH="/path/to/ohio_testing_combined.csv"
+uvicorn app.main:app --reload
+```
+
+### Dataset Privacy
+
+Patient CGM data is strictly private and covered by data use agreements. The server accepts `TEST_CSV_PATH` pointing to local server-side files, but patient records are never logged, stored in source control, or exposed outside their intended inspection endpoints. Error messages and status endpoints reference only base file names (e.g., `ohio_testing_combined.csv`) and never divulge directory paths.
 
 ## Feature Columns (18)
 

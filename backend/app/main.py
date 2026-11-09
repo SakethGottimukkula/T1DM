@@ -9,8 +9,10 @@ from typing import AsyncIterator
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from . import config
+from .casedata import get_case_data
 from .config import (
     CORS_ORIGINS,
     GLUCOSE_MAX,
@@ -27,11 +29,17 @@ from .timeutil import parse_timestamps
 from .predictor import ModelStore
 from .schemas import (
     BacktestResponse,
+    CaseDetail,
+    CaseListResponse,
+    CaseReading,
+    CaseSummary,
+    DataSourceInfo,
     HealthResponse,
     HorizonResult,
     MetricsResponse,
     ModelInfo,
     ModelsResponse,
+    PatientInfo,
     PredictContext,
     PredictRequest,
     PredictResponse,
@@ -408,7 +416,7 @@ async def predict_csv(
 
 @app.post("/v1/backtest", response_model=BacktestResponse)
 async def backtest(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
     horizon: int = Form(...),
     max_points: int = Form(default=2000),
 ) -> BacktestResponse:
@@ -420,30 +428,40 @@ async def backtest(
     if max_points < 50 or max_points > 5000:
         raise HTTPException(422, "max_points must be between 50 and 5000")
 
-    # 2. Read and parse CSV (422)
-    content = await file.read()
-    try:
-        df = pd.read_csv(io.BytesIO(content))
-    except Exception as exc:
-        raise HTTPException(422, f"Could not parse CSV: {exc}")
+    # 2. Source data (upload vs server)
+    if file is not None:
+        content = await file.read()
+        try:
+            df = pd.read_csv(io.BytesIO(content))
+        except Exception as exc:
+            raise HTTPException(422, f"Could not parse CSV: {exc}")
 
-    n_rows_raw = len(df)
+        n_rows_raw = len(df)
+        data_source = "upload"
 
-    # 3. Required columns (422)
-    required_cols = {"timestamp", "glucose", "patient_id"}
-    if not required_cols.issubset(df.columns):
-        raise HTTPException(
-            422,
-            f"CSV must contain 'timestamp', 'glucose', and 'patient_id' columns. Got: {list(df.columns)}",
-        )
+        required_cols = {"timestamp", "glucose", "patient_id"}
+        if not required_cols.issubset(df.columns):
+            raise HTTPException(
+                422,
+                f"CSV must contain 'timestamp', 'glucose', and 'patient_id' columns. Got: {list(df.columns)}",
+            )
 
-    # 4. Timestamps parse (422)
-    try:
-        df["timestamp"] = parse_timestamps(df["timestamp"])
-    except ValueError as exc:
-        raise HTTPException(422, str(exc))
+        try:
+            df["timestamp"] = parse_timestamps(df["timestamp"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+    else:
+        case_data, data_status = get_case_data()
+        if data_status != "ok" or case_data is None:
+            raise HTTPException(
+                422,
+                "No file uploaded and server test data is not configured or unavailable.",
+            )
+        df = case_data.raw_frame.copy()
+        n_rows_raw = len(df)
+        data_source = "server"
 
-    # 5. Model loaded check (503)
+    # 3. Model loaded check (503)
     if not store.is_loaded(horizon):
         raise HTTPException(503, f"Model for {horizon}-min horizon is not loaded.")
 
@@ -520,4 +538,80 @@ async def backtest(
         per_patient=per_patient,
         patient_ids=patient_ids_arr,
         zones=zones_arr,
+        data_source=data_source,
     )
+
+
+# ---------------------------------------------------------------------------
+# Case inspection endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/cases", response_model=CaseListResponse)
+async def list_cases(
+    per_patient: int = Query(default=3, ge=1, le=10, description="Cases per patient (1–10)"),
+) -> CaseListResponse:
+    case_data, data_status = get_case_data()
+
+    if data_status != "ok" or case_data is None:
+        if data_status == "not_configured":
+            raise HTTPException(
+                status_code=503,
+                detail="Server test data is not configured (TEST_CSV_PATH environment variable is unset).",
+            )
+        file_name = config.TEST_CSV_PATH.name if config.TEST_CSV_PATH else "unknown"
+        if data_status == "file_missing":
+            raise HTTPException(
+                status_code=503,
+                detail=f"Server test data file '{file_name}' not found.",
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server test data file '{file_name}' is invalid.",
+        )
+
+    ds_info = DataSourceInfo(
+        configured=True,
+        file_name=case_data.file_name,
+        status="ok",
+        total_readings=case_data.total_readings,
+        total_patients=case_data.total_patients,
+        total_eligible_cases=case_data.total_eligible_cases,
+    )
+    patients = [PatientInfo(**p) for p in case_data.get_patients_info()]
+    cases = [CaseSummary(**c) for c in case_data.get_cases(per_patient=per_patient)]
+
+    return CaseListResponse(
+        data_source=ds_info,
+        patients=patients,
+        cases=cases,
+        total_cases=len(cases),
+    )
+
+
+@app.get("/v1/cases/{case_id}", response_model=CaseDetail)
+async def get_case(case_id: str) -> CaseDetail:
+    case_data, data_status = get_case_data()
+
+    if data_status != "ok" or case_data is None:
+        if data_status == "not_configured":
+            raise HTTPException(
+                status_code=503,
+                detail="Server test data is not configured (TEST_CSV_PATH environment variable is unset).",
+            )
+        file_name = config.TEST_CSV_PATH.name if config.TEST_CSV_PATH else "unknown"
+        if data_status == "file_missing":
+            raise HTTPException(
+                status_code=503,
+                detail=f"Server test data file '{file_name}' not found.",
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server test data file '{file_name}' is invalid.",
+        )
+
+    detail = case_data.get_case_detail(case_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found.")
+
+    return CaseDetail(**detail)

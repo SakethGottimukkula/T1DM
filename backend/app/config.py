@@ -15,6 +15,9 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 MODEL_DIR: Path = Path(os.getenv("MODEL_DIR", str(_BACKEND_DIR / "models")))
 METRICS_PATH: Path = MODEL_DIR / "metrics.json"
 
+_test_csv_env = os.getenv("TEST_CSV_PATH", "").strip()
+TEST_CSV_PATH: Path | None = Path(_test_csv_env) if _test_csv_env else None
+
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------

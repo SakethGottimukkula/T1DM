@@ -137,6 +137,7 @@ class BacktestResponse(BaseModel):
     per_patient: dict[str, dict]
     patient_ids: list[int | str]
     zones: list[str]
+    data_source: str = "upload"
 
 
 class ModelInfo(BaseModel):
@@ -175,3 +176,66 @@ class HealthResponse(BaseModel):
     models_loaded: int
     models_expected: int
     detail: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Case inspection schemas
+# ---------------------------------------------------------------------------
+
+
+class CaseReading(BaseModel):
+    """A single timestamped reading in a case history or future."""
+
+    timestamp: str
+    glucose: float
+
+
+class CaseSummary(BaseModel):
+    """Summary of an eligible case."""
+
+    case_id: str
+    patient_id: str
+    timestamp: str
+    glucose: float
+
+
+class PatientInfo(BaseModel):
+    """Information about a patient in the server test dataset."""
+
+    patient_id: str
+    n_readings: int
+    n_eligible_cases: int
+    first_timestamp: str | None = None
+    last_timestamp: str | None = None
+
+
+class DataSourceInfo(BaseModel):
+    """Status and summary of server-side test dataset."""
+
+    configured: bool
+    file_name: str | None = None
+    status: str
+    total_readings: int | None = None
+    total_patients: int | None = None
+    total_eligible_cases: int | None = None
+
+
+class CaseListResponse(BaseModel):
+    """GET /v1/cases response body."""
+
+    data_source: DataSourceInfo
+    patients: list[PatientInfo]
+    cases: list[CaseSummary]
+    total_cases: int
+
+
+class CaseDetail(BaseModel):
+    """GET /v1/cases/{case_id} response body."""
+
+    case_id: str
+    patient_id: str
+    timestamp: str
+    glucose: float
+    history: list[CaseReading]
+    future: list[CaseReading]
+    actual_at: dict[str, float]
