@@ -453,9 +453,20 @@ async def backtest(
     else:
         case_data, data_status = get_case_data()
         if data_status != "ok" or case_data is None:
+            if data_status == "not_configured":
+                raise HTTPException(
+                    422,
+                    "No file uploaded and TEST_CSV_PATH is not set. Upload a CSV or configure TEST_CSV_PATH.",
+                )
+            name = config.TEST_CSV_PATH.name if config.TEST_CSV_PATH else "unknown"
+            if data_status == "file_missing":
+                raise HTTPException(
+                    422,
+                    f"No file uploaded and the server test data file '{name}' was not found.",
+                )
             raise HTTPException(
                 422,
-                "No file uploaded and server test data is not configured or unavailable.",
+                f"No file uploaded and the server test data file '{name}' is invalid.",
             )
         df = case_data.raw_frame.copy()
         n_rows_raw = len(df)

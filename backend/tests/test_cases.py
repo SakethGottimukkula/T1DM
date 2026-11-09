@@ -105,7 +105,7 @@ def test_vectorised_eligibility_matches_reference_loop(tmp_path: Path):
 
 
 def test_deterministic_case_selection(tmp_path: Path):
-    """Verify get_cases returns identical deterministic cases across calls."""
+    """Verify get_cases returns segment midpoints and determinism across calls."""
     csv_path = _make_synthetic_test_csv(tmp_path)
     cdata = CaseData(csv_path)
 
@@ -121,6 +121,26 @@ def test_deterministic_case_selection(tmp_path: Path):
     # Check case counts per patient
     assert pids.count("101") == 3
     assert pids.count("102") == 3
+
+    # Assert new indices against independent midpoint formula
+    for pid in ("101", "102"):
+        el = cdata._patients[pid]["eligible_indices"]
+        m = len(el)
+        k = 3
+        assert m > k
+        # Independent formula: floor((j + 0.5) * m / k)
+        expected_step = [int(np.floor((j + 0.5) * m / k)) for j in range(k)]
+        expected_indices = el[expected_step]
+
+        # First and last eligible positions are NOT automatically chosen
+        assert 0 not in expected_step
+        assert (m - 1) not in expected_step
+
+        actual_cases = [c for c in cases1 if c["patient_id"] == pid]
+        p_df = cdata._patients[pid]["df"]
+        actual_timestamps = [c["timestamp"] for c in actual_cases]
+        expected_timestamps = [p_df.iloc[idx]["timestamp"].isoformat() for idx in expected_indices]
+        assert actual_timestamps == expected_timestamps
 
 
 def test_case_detail_structure(tmp_path: Path):
@@ -274,10 +294,56 @@ def test_backtest_without_upload(client: TestClient, tmp_path: Path, monkeypatch
     assert len(data["actual"]) == len(data["predicted"])
 
 
-def test_backtest_without_upload_unconfigured_returns_422(client: TestClient, monkeypatch: pytest.MonkeyPatch):
-    """POST /v1/backtest without file returns 422 if TEST_CSV_PATH is unset."""
+def test_backtest_without_upload_error_messages(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify specific 422 messages for not_configured, file_missing, and invalid data."""
+    # 1. not_configured
     monkeypatch.setattr(config, "TEST_CSV_PATH", None)
+    clear_cache()
+    res1 = client.post("/v1/backtest", data={"horizon": 30, "max_points": 500})
+    assert res1.status_code == 422
+    assert res1.json()["detail"] == "No file uploaded and TEST_CSV_PATH is not set. Upload a CSV or configure TEST_CSV_PATH."
 
-    res = client.post("/v1/backtest", data={"horizon": 30, "max_points": 500})
-    assert res.status_code == 422
-    assert "No file uploaded and server test data is not configured" in res.json()["detail"]
+    # 2. file_missing
+    missing_file = tmp_path / "absent_file.csv"
+    monkeypatch.setattr(config, "TEST_CSV_PATH", missing_file)
+    clear_cache()
+    res2 = client.post("/v1/backtest", data={"horizon": 30, "max_points": 500})
+    assert res2.status_code == 422
+    assert res2.json()["detail"] == "No file uploaded and the server test data file 'absent_file.csv' was not found."
+
+    # 3. invalid
+    bad_file = tmp_path / "corrupt_data.csv"
+    bad_file.write_text("invalid,columns\n1,2\n", encoding="utf-8")
+    monkeypatch.setattr(config, "TEST_CSV_PATH", bad_file)
+    clear_cache()
+    res3 = client.post("/v1/backtest", data={"horizon": 30, "max_points": 500})
+    assert res3.status_code == 422
+    assert res3.json()["detail"] == "No file uploaded and the server test data file 'corrupt_data.csv' is invalid."
+
+
+def test_leak_hygiene_and_permission_error_log(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    """Verify directory paths are not leaked in error responses or logs on load failure."""
+    secret_dir = tmp_path / "secret_dir_xyz"
+    secret_dir.mkdir()
+    secret_file = secret_dir / "secret_cases.csv"
+    secret_file.write_text("timestamp,glucose,patient_id\n", encoding="utf-8")
+    monkeypatch.setattr(config, "TEST_CSV_PATH", secret_file)
+
+    def mock_read_csv(*args, **kwargs):
+        raise PermissionError(f"[Errno 13] Permission denied: '{secret_file}'")
+
+    import app.casedata as casedata_mod
+    monkeypatch.setattr(casedata_mod.pd, "read_csv", mock_read_csv)
+
+    clear_cache()
+    with caplog.at_level("WARNING"):
+        res_cases = client.get("/v1/cases")
+        assert res_cases.status_code == 503
+        assert "secret_dir_xyz" not in res_cases.text
+
+        res_bt = client.post("/v1/backtest", data={"horizon": 30})
+        assert res_bt.status_code == 422
+        assert "secret_dir_xyz" not in res_bt.text
+
+        assert "secret_dir_xyz" not in caplog.text
+        assert "Failed to load test CSV secret_cases.csv: PermissionError" in caplog.text

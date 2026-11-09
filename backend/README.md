@@ -52,6 +52,20 @@ docker compose up --build
 
 Models are mounted from `./models` via the volume in `docker-compose.yml`.
 
+## API Contract
+
+The API contract is committed in `openapi.json` and kept strictly in sync with the FastAPI schema.
+
+- **Check schema drift**:
+  ```bash
+  python scripts/export_openapi.py --check
+  ```
+- **Regenerate schema**:
+  ```bash
+  python scripts/export_openapi.py
+  ```
+- **Automated test**: `tests/test_openapi_contract.py` fails if `backend/openapi.json` differs from `app.openapi()`.
+
 ## API Endpoints
 
 ### `GET /health`
@@ -158,12 +172,12 @@ curl -X POST http://127.0.0.1:8000/v1/backtest \
   -F "max_points=2000"
 ```
 
-- **Evaluation rule**: Evaluates only rows where all 18 features and all four targets (30, 60, 90, 120 min) are non-null ($N - 47$ rows per patient). The exact same evaluated row set is used across all four horizons.
+- **Evaluation rule**: Evaluates only rows where all 18 features and all four targets (30, 60, 90, 120 min) are non-null (N - 47 rows per patient). The exact same evaluated row set is used across all four horizons.
 - **Parameters**:
   - `file`: Optional uploaded CSV with `timestamp`, `glucose`, `patient_id`. If omitted, server falls back to `TEST_CSV_PATH`. Returns HTTP 422 if neither is provided.
   - `horizon`: Forecast horizon (30, 60, 90, or 120).
   - `max_points`: Optional int, default 2000 (range 50..5000).
-- **Plot sampling**: When evaluated rows $N > \text{max\_points}$, samples at most `max_points` evenly spaced rows via deterministic `np.linspace(0, n - 1, max_points)` rounded and de-duplicated. If $N \le \text{max\_points}$, all evaluated rows are returned.
+- **Plot sampling**: When evaluated rows N > max_points, samples at most `max_points` evenly spaced rows via deterministic `np.linspace(0, n - 1, max_points)` rounded and de-duplicated. If N <= max_points, all evaluated rows are returned.
 - **Response fields**: Includes overall metrics (`n_rows`, `rmse`, `mae`, `zone_counts`, `zone_percentages`, `a_plus_b_pct`), `n_rows_raw`, `evaluation_rule`, `per_patient` (per-patient metric breakdown), `data_source` (`"upload"` or `"server"`), and parallel plotted arrays capped at `max_points` (`timestamps`, `actual`, `predicted`, `patient_ids`, `zones`).
 
 ### `GET /v1/cases`
@@ -173,11 +187,11 @@ curl http://127.0.0.1:8000/v1/cases?per_patient=3
 ```
 
 - **Query parameters**: `per_patient` (optional int, default 3, range 1–10).
-- **Eligibility criteria**: A reading at index $i$ is eligible as a test case if and only if it has:
-  - At least 36 historical readings ($i-36 \ge 0$, spanning 3 hours),
-  - At least 24 future readings ($i+24 \le n-1$, spanning 2 hours),
-  - All 60 consecutive reading intervals between index $i-36$ and $i+24$ are strictly between 3 and 7 minutes (180s to 420s).
-- **Case selection**: Deterministically selects up to `per_patient` eligible cases per patient evenly spaced across their eligible readings via linear interpolation.
+- **Eligibility criteria**: A reading at index i is eligible as a test case if and only if it has:
+  - At least 36 historical readings (i - 36 >= 0, spanning 3 hours),
+  - At least 24 future readings (i + 24 <= n - 1, spanning 2 hours),
+  - All 60 consecutive reading intervals between index i - 36 and i + 24 are strictly between 3 and 7 minutes (180s to 420s).
+- **Case selection**: Deterministically selects up to `per_patient` eligible cases per patient by partitioning eligible readings into `k` equal segments and picking the segment midpoints `floor((j + 0.5) * m / k)` for `j` in `0..k-1` (where `m` is total eligible cases). This prevents clustering at the extreme boundaries.
 - **Response**: Returns `data_source` summary (`configured`, `file_name`, `status`, `total_readings`, `total_patients`, `total_eligible_cases`), per-patient statistics (`n_readings`, `n_eligible_cases`, `first_timestamp`, `last_timestamp`), and a list of `cases` with `case_id`, `patient_id`, `timestamp`, and `glucose`. Returns HTTP 503 if server test data is not configured or missing.
 
 ### `GET /v1/cases/{case_id}`
@@ -188,8 +202,8 @@ curl http://127.0.0.1:8000/v1/cases/101-20220115T120000
 
 - **Path parameters**: `case_id` formatted as `{patient_id}-{timestamp:%Y%m%dT%H%M%S}`.
 - **Response**: Returns full case context including:
-  - `history`: 37 readings ($i-36$ to $i$ inclusive, representing 3 hours of CGM history up to the decision point),
-  - `future`: 24 readings ($i+1$ to $i+24$ inclusive, representing 2 hours of actual subsequent CGM observations),
+  - `history`: 37 readings (indices i - 36 to i inclusive, representing 3 hours of CGM history up to the decision point),
+  - `future`: 24 readings (indices i + 1 to i + 24 inclusive, representing 2 hours of actual subsequent CGM observations),
   - `actual_at`: Ground truth glucose values at each model horizon (`"30"`, `"60"`, `"90"`, `"120"`).
 - **Errors**: Returns HTTP 404 if the case ID does not match any eligible case. Returns HTTP 503 if server test data is not configured.
 

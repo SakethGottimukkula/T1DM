@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -130,7 +131,10 @@ class CaseData:
             if n_el <= per_patient:
                 selected_indices = eligible
             else:
-                step_indices = np.round(np.linspace(0, n_el - 1, per_patient)).astype(int)
+                step_indices = [
+                    int(math.floor((j + 0.5) * n_el / per_patient))
+                    for j in range(per_patient)
+                ]
                 selected_indices = eligible[step_indices]
 
             p_df = pdata["df"]
@@ -232,7 +236,7 @@ def get_case_data() -> tuple[CaseData | None, str]:
         _cache["status"] = "ok"
         return instance, "ok"
     except Exception as exc:
-        logger.warning("Failed to load test CSV %s: %s", p.name, exc)
+        logger.warning("Failed to load test CSV %s: %s", p.name, exc.__class__.__name__)
         _cache["path"] = p
         _cache["mtime"] = mtime
         _cache["instance"] = None
