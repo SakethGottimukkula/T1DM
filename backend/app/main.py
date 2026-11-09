@@ -11,18 +11,28 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from .config import CORS_ORIGINS, GLUCOSE_MAX, GLUCOSE_MIN, HORIZONS, MIN_HISTORY
+from .config import (
+    CORS_ORIGINS,
+    GLUCOSE_MAX,
+    GLUCOSE_MIN,
+    HORIZONS,
+    METRICS_PATH,
+    MIN_HISTORY,
+)
 from .ega import classify_point
 from .features import FEATURE_COLUMNS, build_features, build_features_single
 from .metrics import summarize
+from .metricsfile import check_consistency, load_metrics, overall_status
 from .timeutil import parse_timestamps
 from .predictor import ModelStore
 from .schemas import (
     BacktestResponse,
     HealthResponse,
     HorizonResult,
+    MetricsResponse,
     ModelInfo,
     ModelsResponse,
+    PredictContext,
     PredictRequest,
     PredictResponse,
 )
@@ -129,6 +139,35 @@ def _validate_readings_df(df: pd.DataFrame) -> None:
         )
 
 
+def _build_context(
+    df_with_features: pd.DataFrame,
+    features_row: dict[str, float],
+    n_submitted: int,
+    patient_id: str | None = None,
+) -> PredictContext:
+    window_df = df_with_features.iloc[-MIN_HISTORY:]
+    window_start_dt = window_df["timestamp"].iloc[0]
+    window_end_dt = window_df["timestamp"].iloc[-1]
+    span_min = round((window_end_dt - window_start_dt).total_seconds() / 60.0, 2)
+    gluc_series = window_df["glucose"]
+
+    return PredictContext(
+        readings_submitted=int(n_submitted),
+        window_readings=MIN_HISTORY,
+        window_span_minutes=span_min,
+        window_start=window_start_dt.isoformat(),
+        window_end=window_end_dt.isoformat(),
+        current_glucose=round(float(gluc_series.iloc[-1]), 2),
+        window_min=round(float(gluc_series.min()), 2),
+        window_max=round(float(gluc_series.max()), 2),
+        window_mean=round(float(gluc_series.mean()), 2),
+        change_5min=round(float(features_row["delta_5"]), 2),
+        change_30min=round(float(features_row["delta_30"]), 2),
+        patient_id=str(patient_id) if patient_id is not None else None,
+        features={col: round(float(features_row[col]), 4) for col in FEATURE_COLUMNS},
+    )
+
+
 def _predict_horizons(
     store: ModelStore,
     features_row: dict[str, float],
@@ -186,13 +225,45 @@ def models_info() -> ModelsResponse:
             horizon=hz,
             loaded=store.is_loaded(hz),
             model_file=f"model_{hz}.json",
+            sha256=store.model_sha256(hz),
+            size_bytes=store.model_size(hz),
         )
         for hz in HORIZONS
     ]
+    metrics, load_status = load_metrics(METRICS_PATH)
+    warnings = check_consistency(metrics, store) if load_status == "ok" else []
+    status = overall_status(load_status, warnings, metrics)
+    feat_imp = (
+        metrics.get("feature_importance")
+        if (metrics is not None and load_status == "ok")
+        else None
+    )
     return ModelsResponse(
         horizons=HORIZONS,
         feature_columns=store.feature_columns,
         models=model_infos,
+        metrics_status=status,
+        metrics_warnings=warnings,
+        feature_importance=feat_imp,
+    )
+
+
+@app.get("/v1/metrics", response_model=MetricsResponse)
+def get_metrics() -> MetricsResponse:
+    store = get_store()
+    metrics, load_status = load_metrics(METRICS_PATH)
+    if load_status != "ok" or metrics is None:
+        raise HTTPException(
+            503,
+            f"Metrics file could not be loaded ({load_status}). "
+            "Please run 'python scripts/evaluate.py' to generate backend/models/metrics.json.",
+        )
+    warnings = check_consistency(metrics, store)
+    status = overall_status(load_status, warnings, metrics)
+    return MetricsResponse(
+        status=status,
+        warnings=warnings,
+        metrics=metrics,
     )
 
 
@@ -233,11 +304,13 @@ def predict(req: PredictRequest) -> PredictResponse:
         horizons = [int(req.horizon)]
 
     preds = _predict_horizons(store, features_row, latest_glucose, horizons)
+    context = _build_context(df, features_row, len(df), patient_id=None)
 
     return PredictResponse(
         predictions=preds,
         latest_glucose=latest_glucose,
         timestamp=ts,
+        context=context,
     )
 
 
@@ -277,6 +350,7 @@ async def predict_csv(
         raise HTTPException(422, str(exc))
 
     # Patient selection
+    selected_pid: str | None = None
     if "patient_id" in df.columns:
         unique_pids = [str(p) for p in df["patient_id"].unique()]
         pid_str = str(patient_id) if patient_id is not None and str(patient_id).strip() != "" else None
@@ -289,6 +363,7 @@ async def predict_csv(
                     f"Patient '{patient_id}' not found. Available patient IDs: {unique_pids[:20]}.",
                 )
             df = df[df["patient_id"].astype(str) == single_pid]
+            selected_pid = single_pid
         elif len(unique_pids) > 1:
             if pid_str is None:
                 raise HTTPException(
@@ -301,6 +376,7 @@ async def predict_csv(
                     f"Patient '{patient_id}' not found. Available patient IDs: {unique_pids[:20]}.",
                 )
             df = df[df["patient_id"].astype(str) == pid_str]
+            selected_pid = pid_str
 
     df = df.sort_values("timestamp").reset_index(drop=True)
 
@@ -320,11 +396,13 @@ async def predict_csv(
     ts = last["timestamp"].isoformat()
 
     preds = _predict_horizons(store, features_row, latest_glucose, horizons)
+    context = _build_context(df, features_row, len(df), patient_id=selected_pid)
 
     return PredictResponse(
         predictions=preds,
         latest_glucose=latest_glucose,
         timestamp=ts,
+        context=context,
     )
 
 

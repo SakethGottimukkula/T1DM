@@ -69,12 +69,31 @@ class HorizonResult(BaseModel):
     )
 
 
+class PredictContext(BaseModel):
+    """Context and window summary for the prediction."""
+
+    readings_submitted: int
+    window_readings: int
+    window_span_minutes: float
+    window_start: str
+    window_end: str
+    current_glucose: float
+    window_min: float
+    window_max: float
+    window_mean: float
+    change_5min: float
+    change_30min: float
+    patient_id: str | None = None
+    features: dict[str, float]
+
+
 class PredictResponse(BaseModel):
     """POST /v1/predict response body."""
 
     predictions: list[HorizonResult]
     latest_glucose: float
     timestamp: str
+    context: PredictContext
 
 
 class BacktestRow(BaseModel):
@@ -126,6 +145,8 @@ class ModelInfo(BaseModel):
     horizon: int
     loaded: bool
     model_file: str
+    sha256: str | None = None
+    size_bytes: int | None = None
 
 
 class ModelsResponse(BaseModel):
@@ -134,6 +155,17 @@ class ModelsResponse(BaseModel):
     horizons: list[int]
     feature_columns: list[str]
     models: list[ModelInfo]
+    metrics_status: str
+    metrics_warnings: list[str]
+    feature_importance: dict | None = None
+
+
+class MetricsResponse(BaseModel):
+    """GET /v1/metrics response body."""
+
+    status: str
+    warnings: list[str]
+    metrics: dict[str, Any]
 
 
 class HealthResponse(BaseModel):

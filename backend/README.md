@@ -66,6 +66,20 @@ curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/v1/models
 ```
 
+- **Model file information**: Each model in `models` includes `sha256` (SHA-256 hash in lowercase hex) and `size_bytes` (file size in bytes), or null if not loaded.
+- **Metrics consistency**: `metrics_status` reports consistency between loaded models and `metrics.json` (`ok`, `model_mismatch`, `feature_mismatch`, `missing`, `unreadable`, or `unsupported_schema`).
+- **Warnings & importance**: `metrics_warnings` lists human-readable discrepancy descriptions, and `feature_importance` contains the full feature importance block from `metrics.json` (or null if missing).
+
+### `GET /v1/metrics`
+
+```bash
+curl http://127.0.0.1:8000/v1/metrics
+```
+
+- **Response**: Returns `{status, warnings, metrics}` with the full contents of `metrics.json`.
+- **Status values**: `ok` (hashes and features match), `model_mismatch` (model hash differs from `metrics.json`), `feature_mismatch` (feature columns differ), `missing` (file not found), `unreadable` (invalid JSON/non-object), `unsupported_schema` (schema_version != 1).
+- **Error handling**: Returns HTTP 503 if `metrics.json` cannot be loaded (`missing`, `unreadable`, or `unsupported_schema`), advising to run `python scripts/evaluate.py`.
+
 ### `POST /v1/predict`
 
 ```bash
@@ -109,6 +123,23 @@ curl -X POST http://127.0.0.1:8000/v1/predict/csv \
   -F "file=@path/to/data.csv" \
   -F "horizon=60"
 ```
+
+### Prediction Context (`context` block in `/v1/predict` and `/v1/predict/csv`)
+
+Both prediction endpoints return a `context` block detailing the input history window:
+- `readings_submitted`: Total number of CGM readings submitted in the request or parsed from the CSV after patient selection.
+- `window_readings`: Number of readings in the feature calculation window, always equal to 24 (2 hours of history).
+- `window_span_minutes`: Time span between the first and last reading in the window in minutes (rounded to 2 decimal places).
+- `window_start`: ISO 8601 timestamp without timezone of the earliest reading in the 24-reading window.
+- `window_end`: ISO 8601 timestamp without timezone of the most recent reading in the window (equals the response timestamp).
+- `current_glucose`: Most recent blood glucose value in mg/dL (rounded to 2 decimal places).
+- `window_min`: Minimum blood glucose value observed across the 24-reading window in mg/dL (rounded to 2 decimal places).
+- `window_max`: Maximum blood glucose value observed across the 24-reading window in mg/dL (rounded to 2 decimal places).
+- `window_mean`: Arithmetic mean of blood glucose values across the 24-reading window in mg/dL (rounded to 2 decimal places).
+- `change_5min`: Rate of glucose change over the last 5 minutes (`glucose - lag_1`) in mg/dL (rounded to 2 decimal places).
+- `change_30min`: Rate of glucose change over the last 30 minutes (`glucose - lag_6`) in mg/dL (rounded to 2 decimal places).
+- `patient_id`: Identifier of the selected patient when provided in CSV input, or null for JSON predict requests without a patient column.
+- `features`: Dictionary containing all 18 engineered feature values supplied to the models in canonical order (rounded to 4 decimal places).
 
 ### `POST /v1/backtest`
 

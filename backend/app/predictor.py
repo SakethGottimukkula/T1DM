@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -22,6 +23,8 @@ class ModelStore:
     def __init__(self, model_dir: Path | None = None) -> None:
         self._dir = Path(model_dir) if model_dir else MODEL_DIR
         self._models: dict[int, xgb.XGBRegressor] = {}
+        self._sha256: dict[int, str] = {}
+        self._size_bytes: dict[int, int] = {}
         self._feature_columns: list[str] = FEATURE_COLUMNS
 
     # ------------------------------------------------------------------
@@ -51,6 +54,9 @@ class ModelStore:
                 model = xgb.XGBRegressor()
                 model.load_model(str(model_file))
                 self._models[hz] = model
+                raw_bytes = model_file.read_bytes()
+                self._sha256[hz] = hashlib.sha256(raw_bytes).hexdigest().lower()
+                self._size_bytes[hz] = len(raw_bytes)
                 logger.info("Loaded model for %d-min horizon from %s", hz, model_file)
             except Exception:
                 logger.exception("Failed to load %s", model_file)
@@ -65,6 +71,12 @@ class ModelStore:
 
     def is_loaded(self, horizon: int) -> bool:
         return horizon in self._models
+
+    def model_sha256(self, horizon: int) -> str | None:
+        return self._sha256.get(horizon)
+
+    def model_size(self, horizon: int) -> int | None:
+        return self._size_bytes.get(horizon)
 
     @property
     def feature_columns(self) -> list[str]:
