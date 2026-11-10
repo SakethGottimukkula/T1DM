@@ -30,7 +30,7 @@
 <main>
   <section id="v-overview" class="view active">
     <header><h1>CGM-Only Blood Glucose Forecasting</h1>
-    <p>Predicts future glucose using only information derived from the CGM signal. The project uses the OhioT1DM 2020 cohort and evaluates 30/60/90/120 minute forecasts from CGM-only history.</p></header>
+    <p>Predicts future glucose using only information derived from the CGM signal. The project uses the OhioT1DM cohort and evaluates 30/60/90/120 minute forecasts from CGM-only history.</p></header>
     <div class="grid4" id="summary"></div>
     <div class="card"><h2>Actual vs predicted trajectory</h2><div class="chart"><canvas id="cMain"></canvas></div></div>
     <div class="grid4" id="fcards"></div>
@@ -50,7 +50,7 @@
   </section>
 
   <section id="v-explorer" class="view">
-    <header><h1>Test explorer</h1><p>Select a predefined held-out CGM sample from the OhioT1DM 2020 cohort. Values cannot be edited manually.</p></header>
+    <header><h1>Test explorer</h1><p>Select a held-out CGM window from the OhioT1DM test set served by the backend. Values cannot be edited manually.</p></header>
     <div class="card controls">
       <label>Patient<select class="sel-patient"></select></label>
       <label>Test case<select class="sel-case"></select></label>
