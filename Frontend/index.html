@@ -67,13 +67,13 @@
     <header><h1>Clinical analysis</h1><p>Clinical-safety evaluation using Clarke Error Grid analysis. This research prototype does not provide treatment or insulin recommendations.</p></header>
     <div class="card"><h2>Glucose range</h2><div id="range"></div><p id="rangeNote" class="muted"></p></div>
     <div class="two">
-      <div class="card"><h2>Clarke error grid (demo points)</h2><div class="chart sq"><canvas id="cClarke"></canvas></div></div>
-      <div class="card"><h2>Zone distribution</h2><div id="zones"></div><p class="muted">Zones A and B are generally treated as clinically acceptable in the literature. Demo points only; selected case is outlined in cyan.</p></div>
+      <div class="card"><h2>Clarke error grid (test-set sample)</h2><div class="chart sq"><canvas id="cClarke"></canvas></div></div>
+      <div class="card"><h2>Zone distribution</h2><div id="zones"></div><p id="zonesNote" class="muted">Zones A and B are generally treated as clinically acceptable in the literature. Points are a deterministic sample across all test patients; zone letters come from the backend's Clarke implementation. Dashed lines: perfect agreement, ±20 %, and the 70 and 180 mg/dL thresholds.</p></div>
     </div>
   </section>
 
   <section id="v-performance" class="view">
-    <header><h1>Performance</h1><p>CGM-only forecasting results on the OhioT1DM 2020 held-out test set. RMSE values and clinically safe A+B percentages are shown below.</p></header>
+    <header><h1>Performance</h1><p>CGM-only forecasting results on the OhioT1DM held-out test set, read from the backend's metrics file.</p></header>
     <div class="grid4" id="perfCards"></div>
     <div class="two">
       <div class="card"><h2>Horizon-wise performance</h2><table id="hTable"></table></div>
