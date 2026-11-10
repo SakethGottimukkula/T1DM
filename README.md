@@ -39,7 +39,7 @@ Every forecast is evaluated not only on statistical metrics (RMSE, MAE) but also
 
 ## Benchmark Results (OhioT1DM Test Cohort)
 
-Tested across all patients in the OhioT1DM test set (2,500 test rows evaluated per horizon):
+Tested across all patients in the OhioT1DM test set (the number of evaluated rows is given in the first table):
 
 <!-- METRICS:START -->
 ### T1: XGBoost performance (test set, 15,688 rows)
@@ -123,7 +123,7 @@ While XGBoost achieves the lowest RMSE and MAE across all four forecasting horiz
 │   │   ├── export_openapi.py    # OpenAPI JSON schema exporter and check tool
 │   │   ├── render_readme_tables.py # Renders Markdown metrics tables into README
 │   │   └── train_models.py      # CLI script for multi-horizon training & eval
-│   ├── tests/                   # Pytest test suite (95 tests)
+│   ├── tests/                   # Pytest test suite
 │   │   ├── __init__.py
 │   │   ├── test_api.py          # Endpoint tests, validation & 422 error cases
 │   │   ├── test_backtest.py     # Backtest endpoint tests & fileless backtest
@@ -223,13 +223,13 @@ The dashboard automatically fetches predictions from the FastAPI service at `htt
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/health` | Service health status and loaded model inventory |
-| `GET` | `/v1/models` | List of supported horizons, feature columns, and file paths |
+| `GET` | `/v1/models` | Loaded models with file hashes and sizes, feature columns, metrics status and feature importance |
 | `GET` | `/v1/metrics` | Returns pre-computed canonical test-set metrics from `backend/models/metrics.json` |
 | `GET` | `/v1/cases` | Representative clinical evaluation cases sampled across patients from `TEST_CSV_PATH` |
 | `GET` | `/v1/cases/{case_id}` | Detailed case inspection with 3h history, 2h future, and actual horizon values |
 | `POST` | `/v1/predict` | JSON prediction given historical CGM readings (minimum 24 readings) |
-| `POST` | `/v1/predict/csv` | Multipart CSV upload returning forecast from the most recent row |
-| `POST` | `/v1/backtest` | Batch evaluation returning RMSE, MAE, Clarke EGA, gap warnings, and capped plot series |
+| `POST` | `/v1/predict/csv` | Multipart CSV upload; optional patient_id selects the patient; forecast from that patient's most recent reading |
+| `POST` | `/v1/backtest` | Batch evaluation (uploaded CSV, or the server test data when no file is sent) returning RMSE, MAE, Clarke EGA zones, per-patient results, gap warnings and a representative plot sample |
 
 ### Example Prediction Request (`POST /v1/predict`)
 ```bash
@@ -261,20 +261,20 @@ The test suite validates Clarke EGA classification boundaries, feature transform
 cd backend
 pytest tests/ -v
 ```
-All 95 test cases pass across 13 test suites:
-- `tests/test_api.py`: 11 API endpoint and validation tests
-- `tests/test_backtest.py`: 7 backtest endpoint and error tests
-- `tests/test_cases.py`: 12 case extraction, midpoint sampling, and log hygiene tests
-- `tests/test_context.py`: 5 context and state initialization tests
-- `tests/test_ega.py`: 14 Clarke EGA boundary & zone mapping tests
-- `tests/test_features.py`: 13 feature calculation & leakage validation tests
-- `tests/test_metrics.py`: 2 metrics calculation tests
-- `tests/test_metricsfile.py`: 9 metrics.json schema validation tests
-- `tests/test_metrics_file.py`: 1 metrics file test
-- `tests/test_openapi_contract.py`: 1 OpenAPI JSON contract synchronization test
-- `tests/test_policy.py`: 11 clinical policy & safety tests
-- `tests/test_render_tables.py`: 5 README table rendering tests
-- `tests/test_timeutil.py`: 4 timestamp and cadence tests
+Test suite coverage:
+- `tests/test_api.py`: Endpoint health, loaded models inventory, predict history/glucose validation, and basic backtest route execution
+- `tests/test_backtest.py`: Batch evaluation canonical row counts across all horizons, per-patient breakdowns, plot sampling, and summary metric alignment
+- `tests/test_cases.py`: Vectorized case eligibility, deterministic segment-midpoint sampling, case detail endpoints, log hygiene, and fileless backtest execution
+- `tests/test_context.py`: Prediction context summary statistics, model file hash reporting, and `/v1/metrics` loading status
+- `tests/test_ega.py`: Hand-checked Clarke Error Grid Analysis boundary values and zone classifications (Zones A through E)
+- `tests/test_features.py`: 18-feature extraction pipeline, lag shifts, rolling windows, cyclical circadian encoding, and target calculation without forward leakage
+- `tests/test_metrics.py`: Statistical (RMSE, MAE) and clinical safety (Clarke zones, A+B%) summarization logic on known samples and empty inputs
+- `tests/test_metrics_file.py`: Structural verification and key presence of canonical `backend/models/metrics.json`
+- `tests/test_metricsfile.py`: Validation and status checks for `metrics.json` against loaded model store hashes, feature columns, and schema versions
+- `tests/test_openapi_contract.py`: Frozen snapshot synchronization between `backend/openapi.json` and live FastAPI schema (`app.openapi()`)
+- `tests/test_policy.py`: Input validation order, timestamp uniqueness, gap tolerance, multi-patient CSV routing, and day-first date formatting
+- `tests/test_render_tables.py`: Markdown table formatting (T1–T4), numerical rounding, patient sorting, and absence of deprecated models
+- `tests/test_timeutil.py`: Flexible timestamp parsing (ISO 8601 and day-first), timezone offset stripping, and timezone-naive standardization
 
 ---
 

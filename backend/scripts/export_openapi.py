@@ -45,7 +45,7 @@ def main() -> None:
         sys.exit(0)
 
     formatted = json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
-    with open(out_file, "w", encoding="utf-8", newline="\r\n") as f:
+    with open(out_file, "w", encoding="utf-8", newline="\n") as f:
         f.write(formatted)
     print(f"Exported OpenAPI schema to {out_file}")
 
