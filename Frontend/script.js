@@ -1,4 +1,4 @@
-/* Demo / research prototype using CGM-only OhioT1DM replay data. */
+/* CGM-only blood glucose forecasting dashboard (research prototype using held-out test cases served by the backend). */
 
 const API_BASE_URL = 'http://127.0.0.1:8000';
 const HZ = [30, 60, 90, 120];
@@ -53,8 +53,7 @@ let apiState = {
   connected: false,
   modelsLoaded: 0,
   modelsExpected: 4,
-  status: 'unknown',
-  featureColumns: []
+  status: 'unknown'
 };
 
 /** UI state for honest status representation across case views (Overview, Forecast, Explorer). */
@@ -75,6 +74,13 @@ let clinicalState = {
   phase: 'loading', // 'loading' | 'ready' | 'offline' | 'degraded' | 'no_data' | 'error'
   detail: '',
   horizon: null,
+  data: null
+};
+
+/** State for Model view (depends solely on GET /v1/models). */
+let modelsState = {
+  phase: 'loading', // 'loading' | 'ready' | 'offline' | 'error'
+  detail: '',
   data: null
 };
 
@@ -295,9 +301,10 @@ function buildCaseObject(detail, predictData) {
   HZ.forEach(h => {
     const predItem = (predictData.predictions || []).find(p => Number(p.horizon) === h);
     const pred = predItem ? predItem.predicted_glucose : null;
+    const zoneLabel = predItem && predItem.zone_label ? predItem.zone_label : null;
     const actual = detail.actual_at ? detail.actual_at[String(h)] : null;
     const err = (pred !== null && actual !== null) ? Math.abs(pred - actual) : null;
-    preds[h] = { pred, actual, err };
+    preds[h] = { pred, actual, err, zoneLabel };
   });
 
   const ctxData = predictData.context || {};
@@ -346,6 +353,7 @@ function updateCasePredictions(caseObj, predictData) {
     const predItem = (predictData.predictions || []).find(p => Number(p.horizon) === h);
     if (predItem && caseObj.preds[h]) {
       caseObj.preds[h].pred = predItem.predicted_glucose;
+      caseObj.preds[h].zoneLabel = predItem.zone_label || caseObj.preds[h].zoneLabel || null;
       if (caseObj.preds[h].actual !== null && caseObj.preds[h].actual !== undefined) {
         caseObj.preds[h].err = Math.abs(caseObj.preds[h].pred - caseObj.preds[h].actual);
       }
@@ -496,6 +504,32 @@ async function loadMetrics() {
 }
 
 /**
+ * Load /v1/models once and cache it for the Model view.
+ */
+async function loadModels() {
+  modelsState.phase = 'loading';
+  renderModel();
+
+  const res = await apiGet('/v1/models');
+  if (!res.ok || !res.data) {
+    if (res.status === 0) {
+      modelsState.phase = 'offline';
+      modelsState.detail = 'Start the API (see README) and reload this page';
+    } else {
+      modelsState.phase = 'error';
+      modelsState.detail = res.detail || 'Failed to fetch model metadata';
+    }
+    renderModel();
+    return false;
+  }
+
+  modelsState.phase = 'ready';
+  modelsState.data = res.data;
+  renderModel();
+  return true;
+}
+
+/**
  * Load backtest for a specific forecast horizon.
  * Cached per horizon. Uses a stale-response guard so older requests don't overwrite newer ones.
  */
@@ -583,12 +617,15 @@ async function bootstrap() {
     perfState.detail = 'Start the API (see README) and reload this page';
     clinicalState.phase = 'offline';
     clinicalState.detail = 'Start the API (see README) and reload this page';
+    modelsState.phase = 'offline';
+    modelsState.detail = 'Start the API (see README) and reload this page';
     apiState.connected = false;
     apiState.status = 'offline';
     renderApiStatus();
     renderAll();
     renderPerformance();
     renderClinical();
+    renderModel();
     return;
   }
 
@@ -598,8 +635,9 @@ async function bootstrap() {
   apiState.modelsLoaded = hData.models_loaded;
   apiState.modelsExpected = hData.models_expected;
 
-  // Load metrics independently (Performance view works even if test data is not configured)
+  // Load metrics and model metadata independently (work even if test data is not configured)
   await loadMetrics();
+  await loadModels();
 
   if (hData.models_loaded < hData.models_expected) {
     uiState.phase = 'degraded';
@@ -849,11 +887,11 @@ function setLine(chartId) {
   chart.update();
 }
 
-function thresholdState(glucoseValue) {
-  if (glucoseValue < 70) {
+function zoneLabelState(zoneLabel) {
+  if (zoneLabel === 'low') {
     return { label: 'Below range', className: 'bad' };
   }
-  if (glucoseValue > 180) {
+  if (zoneLabel === 'high') {
     return { label: 'Above range', className: 'warn' };
   }
   return { label: 'In range', className: 'ok' };
@@ -862,31 +900,33 @@ function thresholdState(glucoseValue) {
 function renderRiskAlerts() {
   const currentCase = getCurrentCase();
   if (!currentCase) return;
-  const currentStatus = thresholdState(currentCase.cur);
+  const [curLabel, curClass] = rangeOf(currentCase.cur);
 
   const trajectoryItems = HZ.map(hour => {
-    const forecastValue = Math.round(currentCase.preds[hour].pred);
-    const state = thresholdState(forecastValue);
+    const forecastItem = currentCase.preds[hour];
+    const forecastValue = Math.round(forecastItem.pred);
+    const state = zoneLabelState(forecastItem.zoneLabel);
     return `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid var(--line);"><span>${hour} min — ${forecastValue} mg/dL</span><span class="${escapeHtml(state.className)}" style="font-weight:600;">${escapeHtml(state.label)}</span></div>`;
   }).join('');
 
   const earliestPrediction = HZ.map(hour => ({
     h: hour,
-    value: Math.round(currentCase.preds[hour].pred)
-  })).find(item => item.value < 70 || item.value > 180);
+    value: Math.round(currentCase.preds[hour].pred),
+    zoneLabel: currentCase.preds[hour].zoneLabel
+  })).find(item => item.zoneLabel === 'low' || item.zoneLabel === 'high');
 
   let alertHtml = 'No threshold excursion predicted within the selected forecast horizon.';
 
   if (earliestPrediction) {
-    const excursionType = earliestPrediction.value < 70
+    const excursionType = earliestPrediction.zoneLabel === 'low'
       ? 'Potential hypoglycemic excursion'
       : 'Potential hyperglycemic excursion';
 
     alertHtml = `<strong>${escapeHtml(excursionType)}</strong> — earliest horizon: ${earliestPrediction.h} min — predicted glucose: ${earliestPrediction.value} mg/dL`;
   }
 
-  const summaryHtml = stat('Current glucose', `${Math.round(currentCase.cur)} mg/dL`, currentStatus.label, currentStatus.className)
-    + stat('Current status', currentStatus.label, 'Threshold band', currentStatus.className)
+  const summaryHtml = stat('Current glucose', `${Math.round(currentCase.cur)} mg/dL`, curLabel, curClass)
+    + stat('Current status', curLabel, 'Threshold band', curClass)
     + stat('Selected patient', `Patient ${currentCase.patient}`, 'OhioT1DM')
     + stat('Selected horizon', `${appState.horizon} min`, 'Current forecast setting');
 
@@ -921,10 +961,10 @@ function renderOverview() {
 
   selectElement('#fcards').innerHTML = futureCardsHtml;
 
-  const [predictionRangeLabel] = rangeOf(currentForecast.pred);
+  const predictionZone = zoneLabelState(currentForecast.zoneLabel);
   const [forecastErrorText] = errorStatus(currentForecast.err);
 
-  selectElement('#interp').innerHTML = `At ${appState.horizon} min the model projects <b>${Math.round(currentForecast.pred)} mg/dL</b> (${escapeHtml(predictionRangeLabel.toLowerCase())}); the held-out value was <b>${Math.round(currentForecast.actual)} mg/dL</b>, an absolute error of ${Math.round(currentForecast.err)} mg/dL (${escapeHtml(forecastErrorText.toLowerCase())}). This CGM-only replay uses the OhioT1DM cohort with 6 patients, 5-minute sampling, and 30/60/90/120 min forecasting. It is a research prototype and not treatment guidance.`;
+  selectElement('#interp').innerHTML = `At ${appState.horizon} min the model projects <b>${Math.round(currentForecast.pred)} mg/dL</b> (${escapeHtml(predictionZone.label.toLowerCase())}); the held-out value was <b>${Math.round(currentForecast.actual)} mg/dL</b>, an absolute error of ${Math.round(currentForecast.err)} mg/dL (${escapeHtml(forecastErrorText.toLowerCase())}). This CGM-only evaluation uses held-out test cases served by the backend (${patientList.length} patients, 5-minute sampling, and 30/60/90/120 min forecasting). It is a research prototype and not treatment guidance.`;
 
   renderRiskAlerts();
   setLine('cMain');
@@ -1282,7 +1322,7 @@ function renderPerformance() {
   modelTableHtml += `<tr><td colspan="3"><strong>Summary:</strong> XGBoost achieves the lowest RMSE across ${rmsePhrase} and lowest MAE across ${maePhrase}, with an RMSE margin over Ridge ranging from ${minMargin} mg/dL to ${maxMargin} mg/dL across horizons. Baselines with a higher clinically safe A+B percentage than XGBoost: ${beatingPhrase}.</td></tr>`;
 
   // Second full-width row: baselines.note, eval rows, patients, date
-  const evalRows = metrics.n_eval_rows || 0;
+  const evalRows = Number(metrics.n_eval_rows || 0);
   const numPatients = (metrics.patients || []).length;
   const genDate = metrics.generated_at_utc ? metrics.generated_at_utc.slice(0, 10) : '';
   const noteText = metrics.baselines && metrics.baselines.note ? metrics.baselines.note : '';
@@ -1298,19 +1338,192 @@ function renderPerformance() {
   selectElement('#mTable').innerHTML = modelTableHtml;
 }
 
+function formatModelSize(bytes) {
+  if (bytes == null || !Number.isFinite(Number(bytes))) {
+    return '—';
+  }
+  const kb = 1024;
+  const mb = kb * kb;
+  const value = Number(bytes);
+  if (value < mb) {
+    return `${(value / kb).toFixed(1)} KB`;
+  }
+  return `${(value / mb).toFixed(1)} MB`;
+}
+
+function renderModelUnavailable() {
+  let label = 'Request failed';
+  let value = 'Error';
+  let detail = modelsState.detail ? String(modelsState.detail).slice(0, 200) : 'Failed to fetch model metadata';
+  let cssClass = 'bad';
+
+  if (modelsState.phase === 'loading') {
+    label = 'Loading';
+    value = '…';
+    detail = 'Fetching model metadata from the backend';
+    cssClass = '';
+  } else if (modelsState.phase === 'offline') {
+    label = 'Backend offline';
+    value = 'Unavailable';
+    detail = 'Start the API (see README) and reload this page';
+    cssClass = 'bad';
+  } else if (modelsState.phase === 'error') {
+    label = 'Request failed';
+    value = 'Error';
+    detail = modelsState.detail ? String(modelsState.detail).slice(0, 200) : 'Failed to fetch model metadata';
+    cssClass = 'bad';
+  }
+
+  const modelCardsEl = selectElement('#modelCards');
+  if (modelCardsEl) {
+    modelCardsEl.innerHTML = stat(label, value, detail, cssClass);
+  }
+
+  const filesCard = selectElement('#modelFilesCard');
+  if (filesCard) filesCard.remove();
+
+  const impCard = selectElement('#modelImpCard');
+  if (impCard) impCard.remove();
+}
+
 function renderModel() {
-  const cards = [
-    ['Glucose Lags', 'Lag features at 5, 10, 15, 30, and 60 minutes capture short- and medium-range CGM dependencies.'],
-    ['Rolling Mean / Standard Deviation', '30-, 60-, 90-, and 120-minute rolling statistics summarize recent glucose stability and variation.'],
-    ['Rate of Change', '5-minute and 30-minute change features quantify direction and acceleration in the glucose trajectory.'],
-    ['Time-of-Day Encoding', 'Hour sine/cosine terms encode cyclical daily patterns in the CGM signal.'],
-    ['XGBoost', 'Strong for small-to-mid-sized tabular data, captures nonlinear relationships, and provides feature-importance interpretability for engineered CGM features.'],
-    ['Four Horizon-Specific Models', 'Four separate XGBoost models are trained, one per forecast horizon: 30, 60, 90, and 120 minutes.'],
-    ['Reference vs Our Approach', 'Multimodal reference model: CGM + insulin + meal composition + other patient/time context with a Transformer + BiLSTM. Our approach: CGM only, CGM-derived features, XGBoost, four horizon-specific models.']
+  if (modelsState.phase !== 'ready' || !modelsState.data) {
+    renderModelUnavailable();
+    return;
+  }
+
+  const data = modelsState.data;
+  const cols = Array.isArray(data.feature_columns) ? data.feature_columns : [];
+  const prefixGroups = [
+    { prefix: 'lag_', title: 'Glucose lags' },
+    { prefix: 'roll_mean_', title: 'Rolling mean' },
+    { prefix: 'roll_std_', title: 'Rolling standard deviation' },
+    { prefix: 'delta_', title: 'Rate of change' },
+    { prefix: 'hour', title: 'Time-of-day encoding' }
   ];
 
-  const cardsHtml = cards.map(([title, text]) => stat(title, '', text)).join('');
-  selectElement('#modelCards').innerHTML = cardsHtml;
+  const grouped = prefixGroups.map(group => ({
+    title: group.title,
+    items: cols.filter(name => String(name).startsWith(group.prefix))
+  })).filter(group => group.items.length > 0);
+
+  const matched = new Set(grouped.flatMap(group => group.items));
+  const otherCols = cols.filter(name => !matched.has(name));
+  if (otherCols.length > 0) {
+    grouped.push({ title: 'Other features', items: otherCols });
+  }
+
+  const totalCard = stat(
+    'Engineered features',
+    `${cols.length} total`,
+    'Computed per reading from historical glucose and timestamps with the same feature order across all horizons.'
+  );
+  const groupCardsHtml = grouped
+    .map(group => stat(group.title, `${group.items.length} features`, group.items.join(', ')))
+    .join('');
+
+  const modelCardsEl = selectElement('#modelCards');
+  if (modelCardsEl) {
+    modelCardsEl.innerHTML = totalCard + groupCardsHtml;
+  }
+
+  const modelViewEl = selectElement('#v-model');
+  if (!modelViewEl) return;
+
+  let filesCard = selectElement('#modelFilesCard');
+  if (!filesCard) {
+    filesCard = document.createElement('div');
+    filesCard.id = 'modelFilesCard';
+    filesCard.className = 'card';
+    modelViewEl.appendChild(filesCard);
+  }
+
+  const modelsArr = Array.isArray(data.models) ? data.models : [];
+  let filesRowsHtml = '<tr><th>Horizon</th><th>Loaded</th><th>SHA-256</th><th>Size</th></tr>';
+  modelsArr.forEach(m => {
+    const horizonLabel = `${Number(m.horizon)} min`;
+    const loadedLabel = m.loaded ? 'yes' : 'no';
+    let shaCell = '<td>not loaded</td>';
+    let sizeCell = '<td>—</td>';
+    if (m.loaded) {
+      const fullHash = m.sha256 ? String(m.sha256) : '';
+      const shortHash = fullHash ? fullHash.slice(0, 12) : '—';
+      shaCell = fullHash
+        ? `<td title="${escapeHtml(fullHash)}">${escapeHtml(shortHash)}</td>`
+        : '<td>—</td>';
+      sizeCell = `<td>${escapeHtml(formatModelSize(m.size_bytes))}</td>`;
+    }
+    filesRowsHtml += `<tr><td>${escapeHtml(horizonLabel)}</td><td>${escapeHtml(loadedLabel)}</td>${shaCell}${sizeCell}</tr>`;
+  });
+
+  const metricsStatus = data.metrics_status != null ? String(data.metrics_status) : 'unknown';
+  const warnings = Array.isArray(data.metrics_warnings) ? data.metrics_warnings : [];
+  const statusClass = metricsStatus !== 'ok' ? 'warn' : 'muted';
+  const warningsText = warnings.length > 0
+    ? ` · Warnings: ${warnings.map(escapeHtml).join('; ')}`
+    : '';
+
+  filesCard.innerHTML = `<h2>Model files</h2><p class="muted">Four horizon-specific XGBoost regressors loaded from the backend model directory. Research prototype, not for treatment decisions.</p><table id="modelFilesTable">${filesRowsHtml}</table><p id="modelMetricsStatus" class="${escapeHtml(statusClass)}">Metrics status: ${escapeHtml(metricsStatus)}${warningsText}</p>`;
+
+  let impCard = selectElement('#modelImpCard');
+  if (!impCard) {
+    impCard = document.createElement('div');
+    impCard.id = 'modelImpCard';
+    impCard.className = 'card';
+    modelViewEl.appendChild(impCard);
+  }
+
+  const fi = data.feature_importance;
+  const fiHorizons = (Array.isArray(data.horizons) && data.horizons.length > 0)
+    ? data.horizons.map(Number)
+    : HZ;
+
+  const featNames = new Set();
+  if (fi && typeof fi === 'object') {
+    fiHorizons.forEach(h => {
+      const map = fi[String(h)];
+      if (map && typeof map === 'object') {
+        Object.keys(map).forEach(k => featNames.add(k));
+      }
+    });
+  }
+
+  if (!fi || typeof fi !== 'object' || featNames.size === 0) {
+    impCard.innerHTML = '<h2>Feature importance</h2><p class="muted" id="modelImpStatus">Feature importance unavailable (metrics file missing or unreadable)</p>';
+    return;
+  }
+
+  const impType = fi.importance_type ? String(fi.importance_type) : 'gain';
+  const ranked = Array.from(featNames).map(name => {
+    const vals = {};
+    let sum = 0;
+    fiHorizons.forEach(h => {
+      const raw = (fi[String(h)] && fi[String(h)][name] != null) ? Number(fi[String(h)][name]) : 0;
+      vals[h] = Number.isFinite(raw) ? raw : 0;
+      sum += vals[h];
+    });
+    const mean = fiHorizons.length > 0 ? sum / fiHorizons.length : 0;
+    return { name, vals, mean };
+  }).sort((a, b) => (b.mean - a.mean) || a.name.localeCompare(b.name));
+
+  const topFeatures = ranked.slice(0, 10);
+  const restFeatures = ranked.slice(10);
+
+  let impTableHtml = `<tr><th>Feature</th>${fiHorizons.map(h => `<th>${h} min</th>`).join('')}</tr>`;
+  topFeatures.forEach(item => {
+    const valCells = fiHorizons.map(h => `<td>${(item.vals[h] * 100).toFixed(1)}%</td>`).join('');
+    impTableHtml += `<tr><td>${escapeHtml(item.name)}</td>${valCells}</tr>`;
+  });
+
+  if (restFeatures.length > 0) {
+    const remCells = fiHorizons.map(h => {
+      const remSum = restFeatures.reduce((acc, item) => acc + item.vals[h], 0);
+      return `<td>${(remSum * 100).toFixed(1)}%</td>`;
+    }).join('');
+    impTableHtml += `<tr><td>Other ${restFeatures.length} features</td>${remCells}</tr>`;
+  }
+
+  impCard.innerHTML = `<h2>Feature importance (${escapeHtml(impType)})</h2><p class="muted">Importance type: ${escapeHtml(impType)}. Top ${topFeatures.length} features ranked by mean ${escapeHtml(impType)} importance across all horizons.</p><table id="modelImpTable">${impTableHtml}</table>`;
 }
 
 function fillCases(caseSelect) {
@@ -1434,6 +1647,8 @@ function init() {
       await loadBacktest(appState.horizon);
     } else if (activeView === 'performance') {
       renderPerformance();
+    } else if (activeView === 'model') {
+      renderModel();
     }
 
     Object.keys(charts).forEach(chartName => {

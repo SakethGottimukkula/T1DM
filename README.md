@@ -5,7 +5,7 @@
 The system combines:
 1. **Machine Learning Core**: 4 XGBoost regressors trained on OhioT1DM CGM data.
 2. **Production Backend**: A FastAPI REST microservice supporting real-time inference, file-based forecasting, and batch backtesting with Clarke Error Grid Analysis (EGA).
-3. **Interactive Frontend**: A clinical dashboard for real-time visualization, patient switching, risk stratification, and error grid analysis.
+3. **Interactive Frontend**: A research dashboard for held-out test case visualization, patient switching, risk alerts, Clarke error grid analysis, benchmark performance metrics, and model metadata inspection.
 
 ---
 
@@ -148,7 +148,7 @@ While XGBoost achieves the lowest RMSE and MAE across all four forecasting horiz
 ├── Frontend/
 │   ├── index.html               # Clinical dashboard markup & multi-view panels
 │   ├── style.css                # Dashboard styling, typography & responsive layouts
-│   └── script.js                # Chart.js visualization, API client & graceful fallback
+│   └── script.js                # Chart.js visualization, API client & backend-driven views
 ├── Model/
 │   └── XGBoost.ipynb            # Research notebook: feature extraction, training & plots
 ├── requirements.txt             # Pinned root dependencies
@@ -206,15 +206,35 @@ cd backend
 docker compose up --build
 ```
 
-### 4. Run the Frontend Dashboard
-Serve the `Frontend/` directory using VS Code Live Server (port 5500) or any local HTTP server:
-```bash
-# Example with Python's built-in HTTP server:
-cd Frontend
-python -m http.server 5500
+### 4. Running the dashboard
+The dashboard requires the running FastAPI backend at `http://127.0.0.1:8000` and does not fall back to synthetic or demo data. Neither the OhioT1DM CSV datasets nor trained model files (`backend/models/*.json`) are stored in the repository.
+
+Start the backend from `backend/` with `TEST_CSV_PATH` set to your local testing CSV:
+```powershell
+# PowerShell (Windows)
+$env:TEST_CSV_PATH = "C:\path\to\ohio_testing_combined.csv"
+cd backend
+..\venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
-Open `http://127.0.0.1:5500` in your browser.
-The dashboard automatically fetches predictions from the FastAPI service at `http://127.0.0.1:8000`. If the backend is offline, it gracefully falls back to synthetic demonstration data.
+```bash
+# Bash (Linux / macOS)
+export TEST_CSV_PATH="/path/to/ohio_testing_combined.csv"
+cd backend
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+In a second terminal, serve the `Frontend/` directory and open `http://127.0.0.1:5500`:
+```bash
+cd Frontend
+python -m http.server 5500 --bind 127.0.0.1
+```
+
+Dashboard states shown in the UI:
+- **Loading**: Initial requests to `/health`, `/v1/metrics`, `/v1/models`, and `/v1/cases` are in flight.
+- **Backend offline**: The API at `http://127.0.0.1:8000` is unreachable (start the backend and reload the page).
+- **Models not loaded**: The backend is reachable, but fewer than the expected 4 horizon models are loaded; `Model` and `Performance` views reflect model/metrics status.
+- **No test data configured**: `TEST_CSV_PATH` is unset or provides no eligible cases; case-dependent views (`Overview`, `Glucose Forecast`, `Test Explorer`, `Clinical Analysis`) prompt for test data while `Performance` and `Model` still display backend data.
+- **Request error**: An API endpoint returned a non-OK error response; the backend's `detail` message is displayed safely.
 
 ---
 
