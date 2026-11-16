@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 import numpy as np
@@ -13,10 +14,11 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from .config import CORS_ORIGINS, GLUCOSE_MAX, GLUCOSE_MIN, HORIZONS, MIN_HISTORY
+from .config import CORS_ORIGINS, GLUCOSE_MAX, GLUCOSE_MIN, HORIZONS, MIN_HISTORY, OHIO_TEST_CSV
 from .ega import classify_array
 from .features import FEATURE_COLUMNS, build_features, build_features_single
 from .predictor import ModelStore
+from .simglucose_features import SIM_FEATURE_COLUMNS, build_sim_features
 from .schemas import (
     BacktestResponse,
     HealthResponse,
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _store: ModelStore | None = None
+_sim_models: dict[int, object] = {}
 
 
 def get_store() -> ModelStore:
@@ -46,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _store
     _store = ModelStore()
     _store.load_all()
+    _load_simglucose_models()
     loaded = len(_store.loaded_horizons)
     logger.info(
         "Startup complete — %d / %d models loaded from %s",
@@ -54,6 +58,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _store.model_dir,
     )
     yield
+
+
+def _load_simglucose_models() -> None:
+    import xgboost as xgb
+
+    model_dir = Path(__file__).resolve().parent.parent / "models" / "simglucose"
+    _sim_models.clear()
+    for horizon in HORIZONS:
+        path = model_dir / f"model_{horizon}.json"
+        if path.is_file():
+            model = xgb.XGBRegressor()
+            model.load_model(str(path))
+            _sim_models[horizon] = model
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +208,70 @@ def models_info() -> ModelsResponse:
     )
 
 
+@app.get("/v1/models/simglucose")
+def simglucose_models_info() -> dict:
+    return {"model_family": "SimGlucose XGBoost", "models_loaded": len(_sim_models) == len(HORIZONS),
+            "horizons_loaded": sorted(_sim_models), "feature_columns": SIM_FEATURE_COLUMNS}
+
+
+@app.post("/v1/predict/simglucose/csv")
+async def predict_simglucose_csv(file: UploadFile = File(...), horizon: str = Form(default="all")) -> dict:
+    if len(_sim_models) != len(HORIZONS):
+        raise HTTPException(503, "SimGlucose models are not trained yet; generate the training data and run the training script first.")
+    if horizon == "all":
+        horizons = HORIZONS
+    else:
+        try:
+            horizons = [int(horizon)]
+        except ValueError:
+            raise HTTPException(422, "horizon must be 30, 60, 90, 120, or 'all'")
+        if horizons[0] not in HORIZONS:
+            raise HTTPException(422, "horizon must be 30, 60, 90, 120, or 'all'")
+    try:
+        df = pd.read_csv(io.BytesIO(await file.read()))
+    except Exception as exc:
+        raise HTTPException(422, f"Could not parse CSV: {exc}")
+    df.columns = [str(col).strip().lower() for col in df.columns]
+    if "timestamp" not in df.columns and "time" in df.columns:
+        df = df.rename(columns={"time": "timestamp"})
+    if "timestamp" not in df.columns and "unnamed: 0" in df.columns:
+        df = df.rename(columns={"unnamed: 0": "timestamp"})
+    for alias in ("glucose", "bg"):
+        if "cgm" not in df.columns and alias in df.columns:
+            df = df.rename(columns={alias: "cgm"})
+    meal_defaulted = "cho" not in df.columns
+    if "cho" not in df.columns:
+        df["cho"] = 0.0
+    if not {"timestamp", "cgm", "insulin"}.issubset(df.columns):
+        raise HTTPException(422, "SimGlucose CSV needs timestamp/Time, CGM, and insulin columns. CHO is optional and defaults to zero.")
+    if "bg" not in df.columns:
+        df["bg"] = df["cgm"]
+    try:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
+    except (ValueError, TypeError):
+        df["timestamp"] = pd.to_datetime(df["timestamp"], dayfirst=True, errors="coerce")
+    for col in ("cgm", "bg", "insulin", "cho"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["timestamp", "cgm", "bg", "insulin"]).sort_values("timestamp")
+    df = df.drop_duplicates("timestamp", keep="last").set_index("timestamp")
+    df = df.resample("5min").agg({"cgm": "mean", "bg": "mean", "insulin": "sum", "cho": "sum"}).dropna(subset=["cgm", "bg"])
+    if len(df) < MIN_HISTORY:
+        raise HTTPException(422, f"At least {MIN_HISTORY} valid 5-minute readings are required. Got {len(df)}.")
+    feature_df = build_sim_features(df.reset_index())
+    last = feature_df.iloc[-1]
+    if last[SIM_FEATURE_COLUMNS].isna().any():
+        raise HTTPException(422, "Not enough history to compute model features.")
+    x = last[SIM_FEATURE_COLUMNS].to_numpy(dtype=float).reshape(1, -1)
+    latest = float(last["cgm"])
+    predictions = []
+    for hz in horizons:
+        predicted = float(_sim_models[hz].predict(x)[0])
+        predictions.append({"horizon": hz, "predicted_glucose": round(predicted, 2),
+                            "change_from_latest": round(predicted - latest, 2), "zone_label": _zone_label(predicted)})
+    return {"predictions": predictions, "latest_glucose": latest, "timestamp": str(last["timestamp"]),
+            "meal_defaulted_to_zero": meal_defaulted}
+
+
 @app.post("/v1/predict", response_model=PredictResponse)
 def predict(req: PredictRequest) -> PredictResponse:
     store = get_store()
@@ -259,6 +340,16 @@ async def predict_csv(
         df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
         raise HTTPException(422, f"Could not parse CSV: {exc}")
+
+    df.columns = [str(col).strip().lower() for col in df.columns]
+    if "timestamp" not in df.columns and "time" in df.columns:
+        df = df.rename(columns={"time": "timestamp"})
+    if "timestamp" not in df.columns and "unnamed: 0" in df.columns:
+        df = df.rename(columns={"unnamed: 0": "timestamp"})
+    if "glucose" not in df.columns and "cgm" in df.columns:
+        df = df.rename(columns={"cgm": "glucose"})
+    if "glucose" not in df.columns and "bg" in df.columns:
+        df = df.rename(columns={"bg": "glucose"})
 
     if "timestamp" not in df.columns or "glucose" not in df.columns:
         raise HTTPException(422, "CSV must contain 'timestamp' and 'glucose' columns.")
@@ -424,3 +515,87 @@ async def backtest(
         predicted=predicted_arr,
         horizon=horizon,
     )
+
+
+@app.get("/v1/backtest/overall")
+def backtest_overall_metrics() -> dict:
+    """Return pooled Ohio held-out RMSE/MAE at each forecast horizon."""
+    store = get_store()
+    if not OHIO_TEST_CSV.is_file():
+        raise HTTPException(404, f"Ohio test CSV not found: {OHIO_TEST_CSV}")
+    if any(not store.is_loaded(horizon) for horizon in HORIZONS):
+        raise HTTPException(503, "Models for all forecast horizons must be loaded to calculate overall RMSE.")
+
+    try:
+        df = pd.read_csv(OHIO_TEST_CSV)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="%d-%m-%Y %H:%M:%S")
+    except Exception as exc:
+        raise HTTPException(422, f"Could not read or parse Ohio test CSV: {exc}")
+    required = {"timestamp", "glucose", "patient_id"}
+    if not required.issubset(df.columns):
+        raise HTTPException(422, "Ohio test CSV must contain timestamp, glucose, and patient_id columns.")
+
+    df = df.sort_values(["patient_id", "timestamp"]).reset_index(drop=True)
+    df_feat = build_features(df, group_col="patient_id")
+    metrics: dict[str, dict[str, float | int]] = {}
+    for horizon in HORIZONS:
+        target_col = f"target_{horizon}"
+        valid = df_feat.dropna(subset=FEATURE_COLUMNS + [target_col])
+        if valid.empty:
+            raise HTTPException(422, f"No valid Ohio test rows for {horizon}-minute horizon.")
+        actual = valid[target_col].to_numpy()
+        predicted = store._models[horizon].predict(valid[FEATURE_COLUMNS].values)  # type: ignore[attr-defined]
+        metrics[str(horizon)] = {
+            "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 2),
+            "mae": round(float(mean_absolute_error(actual, predicted)), 2),
+            "n_rows": int(len(valid)),
+        }
+    return {"dataset": "OhioT1DM held-out test set", "metrics": metrics}
+
+
+@app.get("/v1/backtest/patient/{patient_id}")
+def backtest_patient_metrics(patient_id: str) -> dict:
+    """Return Ohio held-out RMSE/MAE for one patient at every horizon."""
+    store = get_store()
+    if not OHIO_TEST_CSV.is_file():
+        raise HTTPException(404, f"Ohio test CSV not found: {OHIO_TEST_CSV}")
+
+    try:
+        df = pd.read_csv(OHIO_TEST_CSV)
+    except Exception as exc:
+        raise HTTPException(422, f"Could not read Ohio test CSV: {exc}")
+    required_cols = {"timestamp", "glucose", "patient_id"}
+    if not required_cols.issubset(df.columns):
+        raise HTTPException(422, "Ohio test CSV must contain timestamp, glucose, and patient_id columns.")
+    try:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="%d-%m-%Y %H:%M:%S")
+    except (ValueError, TypeError):
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, f"Could not parse Ohio test timestamps: {exc}")
+
+    patient_rows = df[df["patient_id"].astype(str) == patient_id]
+    if patient_rows.empty:
+        available = sorted(df["patient_id"].dropna().astype(str).unique().tolist())
+        raise HTTPException(404, f"Patient '{patient_id}' not found in Ohio test CSV. Available: {available}")
+    if any(not store.is_loaded(horizon) for horizon in HORIZONS):
+        raise HTTPException(503, "Models for all forecast horizons must be loaded to calculate patient RMSE.")
+
+    patient_rows = patient_rows.sort_values("timestamp").reset_index(drop=True)
+    df_feat = build_features(patient_rows, group_col="patient_id")
+    metrics: dict[str, dict[str, float | int]] = {}
+    for horizon in HORIZONS:
+        target_col = f"target_{horizon}"
+        valid = df_feat.dropna(subset=FEATURE_COLUMNS + [target_col]).reset_index(drop=True)
+        if valid.empty:
+            raise HTTPException(422, f"Not enough valid test rows for patient '{patient_id}'.")
+        actual = valid[target_col].to_numpy()
+        predicted = store._models[horizon].predict(valid[FEATURE_COLUMNS].values)  # type: ignore[attr-defined]
+        metrics[str(horizon)] = {
+            "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 2),
+            "mae": round(float(mean_absolute_error(actual, predicted)), 2),
+            "n_rows": int(len(valid)),
+        }
+
+    return {"patient_id": patient_id, "metrics": metrics}

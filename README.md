@@ -1,191 +1,128 @@
-# Glucose Horizon — Blood Glucose Forecasting (CGM-Only)
+# Glucose Horizon
 
-**Glucose Horizon** is a multi-horizon blood glucose forecasting and clinical safety evaluation system for Type 1 Diabetes (T1D). It uses continuous glucose monitoring (CGM) sensor streams alone—without requiring manual insulin dosing or meal logs—to predict glucose trajectories 30, 60, 90, and 120 minutes into the future.
+Glucose Horizon is a multi-horizon blood-glucose forecasting project for Type 1 diabetes. It includes a FastAPI backend and a browser dashboard. Forecast horizons are 30, 60, 90, and 120 minutes.
 
-The system combines:
-1. **Machine Learning Core**: 4 XGBoost regressors trained on OhioT1DM CGM data.
-2. **Production Backend**: A FastAPI REST microservice supporting real-time inference, file-based forecasting, and batch backtesting with Clarke Error Grid Analysis (EGA).
-3. **Interactive Frontend**: A clinical dashboard for real-time visualization, patient switching, risk stratification, and error grid analysis.
+The app has two prediction paths:
 
----
+- **CGM only (OhioT1DM):** uses the existing Ohio-trained models for glucose-history CSVs.
+- **CGM with insulin (SimGlucose):** uses separate XGBoost models trained on virtual-patient traces produced with SimGlucose. CHO (meal carbohydrate) is optional and is treated as zero when omitted.
 
-## Problem Statement & Clinical Motivation
+An uploaded file is used for inference only; uploading does not train or fine-tune a model. The two model families have separate weights and feature pipelines.
 
-Type 1 diabetes management requires continuous vigilance to prevent two life-threatening acute extremes:
-- **Hypoglycemia (< 70 mg/dL)**: Can lead to loss of consciousness, seizures, or diabetic coma within minutes.
-- **Hyperglycemia (> 180 mg/dL)**: Leads over time to diabetic ketoacidosis (DKA) and systemic microvascular/macrovascular damage.
+## Repository layout
 
-Existing multi-modal models often depend on patient self-reported carb intake and bolus insulin data. In real-world conditions, meal logging is frequently skipped, delayed, or inaccurate. This project assesses **how accurate, reliable, and clinically safe multi-horizon forecasts can be when relying strictly on CGM streams**.
-
----
-
-## Approach & Features
-
-### Feature Engineering (18 features derived exclusively from CGM)
-Features are computed strictly backwards from each reading with zero forward lookahead:
-- **Lag Readings**: `lag_1` (t-5m), `lag_2` (t-10m), `lag_3` (t-15m), `lag_6` (t-30m), `lag_12` (t-60m)
-- **Rolling Statistics**: Rolling mean and standard deviation over 30, 60, 90, and 120-minute windows (`roll_mean_30`, `roll_std_30`, `roll_mean_60`, `roll_std_60`, `roll_mean_90`, `roll_std_90`, `roll_mean_120`, `roll_std_120`)
-- **Rate of Change (Deltas)**: 5-minute velocity (`delta_5 = glucose - lag_1`) and 30-minute velocity (`delta_30 = glucose - lag_6`)
-- **Circadian Encoding**: Cyclical time-of-day features (`hour`, `hour_sin`, `hour_cos`)
-
-### Clinical Safety Metric: Clarke Error Grid Analysis (EGA)
-Every forecast is evaluated not only on statistical metrics (RMSE, MAE) but also against the clinical standard:
-- **Zone A**: Clinically accurate (leads to correct treatment decisions)
-- **Zone B**: Benign errors (leads to no treatment or safe treatment)
-- **Clinically Safe**: Zone A + Zone B (target: > 95% for safe automated alert systems)
-- **Zones C, D, E**: Overcorrection, failure to detect hypo/hyperglycemia, or erroneous treatment
-
----
-
-## Benchmark Results (OhioT1DM Test Cohort)
-
-Tested across all patients in the OhioT1DM test set:
-
-| Horizon | Prediction Shift | RMSE (mg/dL) | MAE (mg/dL) | Clinically Safe (A + B) | Zone A | Zone B |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **30 min** | 6 steps ahead (t+30m) | **20.94** | **14.58** | **98.30%** | 88.60% | 9.70% |
-| **60 min** | 12 steps ahead (t+60m) | **33.67** | **24.32** | **96.72%** | 76.54% | 20.18% |
-| **90 min** | 18 steps ahead (t+90m) | **42.44** | **31.76** | **95.14%** | 68.21% | 26.93% |
-| **120 min** | 24 steps ahead (t+120m) | **48.08** | **36.98** | **93.87%** | 62.80% | 31.07% |
-
----
-
-## Repository Structure
-
-```
-├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI application, lifespan, routes & CORS
-│   │   ├── config.py            # Environment configuration & validation thresholds
-│   │   ├── schemas.py           # Pydantic v2 request/response schemas
-│   │   ├── features.py          # 18-column feature pipeline (grouped & single-patient)
-│   │   ├── predictor.py         # XGBoost model loader & inference manager
-│   │   └── ega.py               # Clarke Error Grid classification logic
-│   ├── models/                  # Exported XGBoost JSON models & feature spec
-│   │   ├── model_30.json
-│   │   ├── model_60.json
-│   │   ├── model_90.json
-│   │   ├── model_120.json
-│   │   └── feature_columns.json
-│   ├── scripts/
-│   │   └── train_models.py      # CLI script for multi-horizon training & eval
-│   ├── tests/                   # Pytest test suite (38 tests)
-│   │   ├── test_api.py          # Endpoint tests, validation & 422 error cases
-│   │   ├── test_ega.py          # Hand-checked Clarke EGA boundary tests
-│   │   └── test_features.py     # Feature correctness & leakage tests
-│   ├── Dockerfile               # Container definition (python:3.11-slim + libgomp1)
-│   ├── docker-compose.yml       # Production Compose configuration with models mount
-│   ├── requirements.txt         # Pinned backend dependencies
-│   └── README.md                # Detailed backend documentation & curl examples
-├── Frontend/
-│   ├── index.html               # Clinical dashboard markup & multi-view panels
-│   ├── style.css                # Dashboard styling, typography & responsive layouts
-│   └── script.js                # Chart.js visualization, API client & graceful fallback
-├── Model/
-│   └── XGBoost.ipynb            # Research notebook: feature extraction, training & plots
-├── requirements.txt             # Pinned root dependencies
-├── .gitignore                   # Excludes CSV datasets, checkpoints & artifacts
-└── README.md                    # Project README
+```text
+backend/
+  app/                 FastAPI routes, predictors, feature engineering, EGA
+  data/                Generated SimGlucose training data (not user upload data)
+  models/              Ohio models and separate models/simglucose weights
+  scripts/             Ohio and SimGlucose training scripts
+  tests/               Backend tests
+Frontend/
+  index.html           Dashboard views, including Models, Performance, and Upload
+  style.css            Responsive dashboard styles and animations
+  script.js            Navigation, charts, API calls, upload, cursor effect
+Model/                 Research notebooks
 ```
 
----
+## Run locally
 
-## Quick Start — Running the Full System
+Install the project dependencies:
 
-### 1. Prerequisites & Environment Setup
-Clone the repository and install dependencies:
-```bash
-python -m venv venv
-venv\Scripts\activate       # Windows
-# source venv/bin/activate  # macOS / Linux
-
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+pip install -r backend/requirements.txt
 ```
 
-### 2. Model Training (Optional if pre-trained JSON models exist)
-If retraining from OhioT1DM CSVs:
-```bash
-python backend/scripts/train_models.py \
-  --train path/to/ohio_training_combined.csv \
-  --test path/to/ohio_testing_combined.csv
-```
-This saves `model_30.json`, `model_60.json`, `model_90.json`, `model_120.json`, and `feature_columns.json` into `backend/models/`.
+Start the backend from the repository root:
 
-### 3. Launch the Backend API
-Start the FastAPI server via Uvicorn:
-```bash
-cd backend
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-- API Base URL: `http://127.0.0.1:8000`
-- Interactive Swagger UI: `http://127.0.0.1:8000/docs`
-- OpenAPI Specification: `http://127.0.0.1:8000/openapi.json`
-
-Alternatively, run via Docker Compose:
-```bash
-cd backend
-docker compose up --build
+```powershell
+uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
 ```
 
-### 4. Run the Frontend Dashboard
-Serve the `Frontend/` directory using VS Code Live Server (port 5500) or any local HTTP server:
-```bash
-# Example with Python's built-in HTTP server:
+API documentation is available at `http://127.0.0.1:8000/docs`.
+
+Serve the frontend in a second terminal:
+
+```powershell
 cd Frontend
 python -m http.server 5500
 ```
-Open `http://127.0.0.1:5500` in your browser.
-The dashboard automatically fetches predictions from the FastAPI service at `http://127.0.0.1:8000`. If the backend is offline, it gracefully falls back to synthetic demonstration data.
 
----
+Open `http://127.0.0.1:5500`. The frontend calls the backend at `http://127.0.0.1:8000`. If the API is unavailable, some dashboard views can use synthetic demonstration data; such data is for UI demonstration and is not a patient-specific forecast.
 
-## Backend API Specification
+## Models and training data
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/health` | Service health status and loaded model inventory |
-| `GET` | `/v1/models` | List of supported horizons, feature columns, and file paths |
-| `POST` | `/v1/predict` | JSON prediction given historical CGM readings (minimum 24 readings) |
-| `POST` | `/v1/predict/csv` | Multipart CSV upload returning forecast from the most recent row |
-| `POST` | `/v1/backtest` | Batch evaluation returning RMSE, MAE, Clarke EGA, gap warnings, and capped plot series |
+### OhioT1DM: CGM-only
 
-### Example Prediction Request (`POST /v1/predict`)
-```bash
-curl -X POST http://127.0.0.1:8000/v1/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "readings": [
-      {"timestamp": "2026-11-03T08:00:00", "glucose": 120.0},
-      {"timestamp": "2026-11-03T08:05:00", "glucose": 122.0},
-      ... 24+ consecutive 5-minute CGM readings ...
-    ],
-    "horizon": "all"
-  }'
+The Ohio pipeline retains its existing models and behavior. The model predicts future glucose from past CGM-derived lags, rolling statistics, rates of change, and time-of-day features. Ohio data is not included in the repository; access is subject to the dataset's data-use terms. Train or evaluate the Ohio models with:
+
+```powershell
+python backend/scripts/train_models.py --train path/to/ohio_training_combined.csv --test path/to/ohio_testing_combined.csv
 ```
 
-### Example Backtest Request (`POST /v1/backtest`)
-```bash
-curl -X POST http://127.0.0.1:8000/v1/backtest \
-  -F "file=@ohio_testing_combined.csv" \
-  -F "horizon=30"
+### SimGlucose: CGM plus insulin, optional CHO
+
+Generate virtual-patient data and train the separate multimodal models with:
+
+```powershell
+python backend/scripts/train_simglucose_models.py
 ```
 
----
+The script defaults to simulating 30 virtual patients (10 each in adult, adolescent, and child groups) for 35 days at five-minute sampling, about 10,081 raw readings per patient. Override the duration with `--days N`. It saves the generated raw CSV to `backend/data/simglucose_training.csv` and the four horizon models and feature specification to `backend/models/simglucose/`.
 
-## Running the Automated Test Suite
+Patients are split by ID: 24 patients are used to fit model weights and six held-out patients are used only for evaluation. The input features use past CGM, insulin, and CHO; `BG` is the prediction target, and simulator risk fields are excluded. The training script's 35-day setting is a default, not a guarantee that existing generated artifacts were made with that setting: **the currently saved CSV has 14,430 rows, 30 patients, and 481 rows per patient (one day). Existing SimGlucose model files were trained from that saved one-day dataset.** Rerun the script successfully to regenerate the 35-day dataset and replace those model files. Simulation can take several minutes.
 
-The test suite validates Clarke EGA classification boundaries, feature transformations (ensuring zero data leakage and exact lag shifts), and API routes:
-```bash
-cd backend
-pytest tests/ -v
-```
-All 38 test cases pass:
-- `tests/test_ega.py`: 13 EGA boundary & zone mapping tests
-- `tests/test_features.py`: 13 feature calculation & leakage validation tests
-- `tests/test_api.py`: 12 API endpoint, validation, and backtest tests
+The SimGlucose evaluation split is patient-held-out but simulator-based. It does not establish performance on real people or replace clinical validation.
 
----
+## Frontend sections
 
-## Data Notice
+- **Overview:** dashboard summary and patient selector. When backend data is unavailable, synthetic demo cases may be shown; the demo's displayed current glucose is not fetched from a selected real Ohio patient.
+- **Performance:** Ohio held-out overall metrics and patient-specific metrics, including RMSE, MAE, and Clarke Error Grid zones. Horizon charts show RMSE; sample-count labels are omitted from the visible metrics table.
+- **Models:** descriptions of the Ohio CGM-only and SimGlucose multimodal model families, their horizons, and data paths.
+- **Upload CGM Data:** large CSV picker on the left, model and horizon controls on the right, and prediction output below. A brief loading state (about 1.5–2.5 seconds minimum) is shown during upload prediction.
+- **Visual details:** animated model cards and a cursor-following dotted background. The cursor effect fades with distance and is disabled for reduced-motion and touch-only contexts.
 
-This project utilizes the **OhioT1DM Dataset** (2020 cohort). Access to the OhioT1DM dataset requires an executed Data Use Agreement with Ohio University and is therefore **not distributed** in this repository. All CSV datasets are explicitly gitignored.
+## CSV upload formats
+
+Choose the prediction mode that matches the data:
+
+| Mode | Required columns | Optional columns | Notes |
+|---|---|---|---|
+| CGM only (Ohio) | Timestamp and glucose | — | Use at least 25 sequential readings at roughly five-minute intervals. Accepted aliases include `Time`/`timestamp` and `CGM`/`BG` as supported by the backend parser. |
+| CGM + insulin (SimGlucose) | Timestamp/`Time`, `CGM`, `insulin` | `CHO`; `BG` | CHO is set to zero if absent. If `BG` is absent, CGM is used as the target-side reference for features/output. Data is resampled to five-minute intervals; at least 25 valid readings are required. |
+
+The SimGlucose route needs trained weights present in `backend/models/simglucose/`. If they are absent, the endpoint returns HTTP 503 until the SimGlucose training script completes. Uploaded records are not added to training.
+
+## API reference
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/health` | Backend and Ohio model health/inventory |
+| `GET` | `/v1/models` | Ohio model horizons and features |
+| `GET` | `/v1/models/simglucose` | SimGlucose model load status and features |
+| `POST` | `/v1/predict` | Ohio CGM-only prediction from JSON readings |
+| `POST` | `/v1/predict/csv` | Ohio CGM-only prediction from uploaded CSV |
+| `POST` | `/v1/predict/simglucose/csv` | SimGlucose prediction from uploaded CGM/insulin/optional CHO CSV |
+| `POST` | `/v1/backtest` | Ohio backtest for an uploaded CSV and chosen horizon |
+| `GET` | `/v1/backtest/overall` | Ohio held-out overall metrics across horizons |
+| `GET` | `/v1/backtest/patient/{patient_id}` | Ohio held-out metrics for one patient across horizons |
+
+The backtest routes use the Ohio feature pipeline and Ohio models; they are not a SimGlucose backtest. The patient-specific route reports metrics for the requested patient from the configured Ohio test CSV. The uploaded-file `/v1/backtest` requires `timestamp`, `glucose`, and `patient_id` columns and a supported horizon (30, 60, 90, or 120).
+
+## Clinical evaluation
+
+Ohio forecasts are reported with RMSE and MAE and classified with Clarke Error Grid Analysis (EGA). Zones A and B are commonly grouped as clinically acceptable for this analysis. These metrics are model-evaluation aids and are not medical advice or a substitute for clinical validation.
+
+The benchmark figures shown in the research materials describe the Ohio test cohort and depend on the model/data version used for that run; reproduce them with the corresponding data and training/evaluation workflow rather than treating them as a guarantee for new uploads.
+
+## Data and artifact notes
+
+- OhioT1DM data is not bundled in this repository. All users must follow its access and data-use terms.
+- `backend/data/simglucose_training.csv` contains synthetic SimGlucose traces generated by the training script.
+- Model JSON files are runtime artifacts. The backend loads the Ohio family and the SimGlucose family from separate directories; restart the backend after replacing model files so it reloads the weights.
+- Synthetic frontend demo data is only a fallback for demonstrating the interface.
+
+More backend-specific request examples and configuration notes are in [backend/README.md](backend/README.md).

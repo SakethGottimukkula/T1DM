@@ -13,6 +13,10 @@ from pathlib import Path
 # Default MODEL_DIR is backend/models relative to the repo root.
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 MODEL_DIR: Path = Path(os.getenv("MODEL_DIR", str(_BACKEND_DIR / "models")))
+_REPO_DIR = _BACKEND_DIR.parent
+OHIO_TEST_CSV: Path = Path(
+    os.getenv("OHIO_TEST_CSV", str(_REPO_DIR / "ohio_testing_combined.csv"))
+)
 
 # ---------------------------------------------------------------------------
 # CORS

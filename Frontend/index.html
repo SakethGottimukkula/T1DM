@@ -12,6 +12,7 @@
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.453.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
+  <canvas class="cursor-dots" id="cursorDots" aria-hidden="true"></canvas>
   <!-- Mobile top bar -->
   <header class="mobile-bar" role="banner">
     <button type="button" class="icon-btn" id="menuToggle" aria-label="Open navigation menu" aria-expanded="false" aria-controls="sidebar">
@@ -50,6 +51,9 @@
       </button>
       <button type="button" data-view="model">
         <i data-lucide="network" aria-hidden="true"></i>Model
+      </button>
+      <button type="button" data-view="upload">
+        <i data-lucide="upload" aria-hidden="true"></i>Upload CGM Data
       </button>
     </nav>
 
@@ -206,7 +210,7 @@
           <h1 id="perf-title">Performance</h1>
           <p>
             CGM-only forecasting results on the OhioT1DM 2020 held-out test set.
-            RMSE (mg/dL) and clinically safe A+B percentages by horizon.
+            Overall and selected-patient RMSE (mg/dL), scored reading counts, and clinically safe A+B percentages by horizon.
           </p>
         </header>
 
@@ -214,47 +218,121 @@
 
         <div class="two">
           <div class="card">
-            <h2>Horizon-wise performance</h2>
+            <h2>Overall and patient-specific RMSE</h2>
             <div class="table-wrap"><table id="hTable"></table></div>
           </div>
           <div class="card">
-            <h2>Error vs horizon</h2>
-            <div class="chart"><canvas id="cErr" aria-label="Error versus horizon chart"></canvas></div>
+            <h2>Patient RMSE by horizon</h2>
+            <div class="chart"><canvas id="cErr" aria-label="Patient RMSE by forecast horizon"></canvas></div>
           </div>
         </div>
 
         <div class="card">
           <h2>Model comparison</h2>
-          <div class="table-wrap"><table id="mTable"></table></div>
+          <div class="table-wrap model-comparison-wrap"><table id="mTable" class="model-comparison-table"></table></div>
         </div>
       </section>
 
       <!-- 6. Model -->
       <section id="v-model" class="view" aria-labelledby="model-title" hidden>
         <header class="view-header">
-          <h1 id="model-title">Model</h1>
+          <h1 id="model-title">How the Forecasts Work</h1>
           <p>
-            CGM-only historical sequences and engineered features feed horizon-specific XGBoost models
-            for 30 / 60 / 90 / 120 minute forecasts.
+            Two separate model families handle your uploaded data. Each forecast uses that file’s recent history,
+            while the model weights are shared across the patients used for training.
           </p>
         </header>
 
-        <div class="flow" aria-label="Model pipeline">
-          <div class="node">Historical CGM sequence</div>
-          <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
-          <div class="node">CGM-derived feature engineering</div>
-          <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
-          <div class="node accent">XGBoost model for selected horizon</div>
-          <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
-          <div class="node">Future glucose prediction</div>
+        <div class="model-paths">
+          <article class="card model-path model-path--ohio">
+            <div class="model-path-heading"><h2>CGM-only · OhioT1DM</h2><span class="model-badge">18 features</span></div>
+            <p class="muted">For uploads with CGM readings only.</p>
+            <div class="flow" aria-label="Ohio CGM-only model pipeline">
+              <div class="node">Patient’s recent CGM history</div>
+              <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+              <div class="node">CGM lags · rolling trends · time</div>
+              <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+              <div class="node accent">Ohio XGBoost · <span data-model-horizon>60</span> min</div>
+              <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+              <div class="node">Predicted future glucose</div>
+            </div>
+            <p class="path-note">Trained on OhioT1DM records pooled across patients. Patient IDs keep feature windows separate during training.</p>
+          </article>
+
+          <article class="card model-path model-path--sim">
+            <div class="model-path-heading"><h2>CGM + insulin + meal · SimGlucose</h2><span class="model-badge model-badge--sim">28 features</span></div>
+            <p class="muted">For uploads that include insulin; CHO is optional and defaults to zero.</p>
+            <div class="flow" aria-label="SimGlucose multimodal model pipeline">
+              <div class="node">Patient’s CGM + insulin + CHO history</div>
+              <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+              <div class="node">Past-only signals · no risk fields</div>
+              <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+              <div class="node accent">SimGlucose XGBoost · <span data-model-horizon>60</span> min</div>
+              <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+              <div class="node">Predicted future blood glucose</div>
+            </div>
+            <p class="path-note">Trained across 30 virtual patients. Simulated performance does not establish real-patient accuracy.</p>
+          </article>
         </div>
 
-        <div class="grid5" id="modelCards"></div>
+        <div class="grid4" id="modelCards"></div>
+        <p class="model-demo-note"><i data-lucide="info" aria-hidden="true"></i><span>The selected patient’s Overview reading is generated demo data. Upload a CSV to forecast from a patient’s supplied history.</span></p>
+      </section>
+
+      <!-- 7. User data upload -->
+      <section id="v-upload" class="view" aria-labelledby="upload-title" hidden>
+        <header class="view-header">
+          <h1 id="upload-title">Upload CGM History</h1>
+          <p>Choose the prediction model that matches the columns in your CSV. The upload is used for prediction only.</p>
+        </header>
+
+        <div class="card upload-controls">
+          <div class="file-picker">
+            <input type="file" id="uploadCsv" accept=".csv,text/csv" aria-label="Choose CGM history CSV" hidden>
+            <div class="file-picker-copy">
+              <span class="file-picker-title">Your glucose history</span>
+              <strong id="uploadFileName" aria-live="polite">No file selected</strong>
+              <span class="muted">Select a CSV file from your device</span>
+            </div>
+            <button type="button" class="btn primary choose-csv" id="chooseCsv">
+              <i data-lucide="file-up" aria-hidden="true"></i><span>Choose CSV file</span>
+            </button>
+          </div>
+          <div class="upload-parameters">
+            <label>Prediction model
+              <select id="uploadMode" aria-label="Choose a prediction model">
+                <option value="cgm">CGM only · Ohio-trained models</option>
+                <option value="multimodal">CGM + insulin + optional meal · SimGlucose models</option>
+              </select>
+            </label>
+            <label>Forecast horizon
+              <select id="uploadHorizon" aria-label="Choose forecast horizon">
+                <option value="all">All horizons</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+                <option value="90">90 min</option>
+                <option value="120">120 min</option>
+              </select>
+            </label>
+            <button type="button" class="btn primary upload-submit" id="uploadRun">
+              <i data-lucide="upload" aria-hidden="true"></i><span>Upload &amp; Predict</span>
+            </button>
+          </div>
+        </div>
+
+        <p class="muted" id="uploadHelp">CSV needs timestamp and glucose (mg/dL), with at least 25 sequential readings at roughly 5-minute intervals.</p>
+        <div class="grid4" id="uploadResults" aria-live="polite"></div>
+        <div class="card">
+          <h2>Prediction models</h2>
+          <p>CGM-only forecasts use the existing OhioT1DM XGBoost models. Multimodal forecasts use separate models trained on SimGlucose virtual-patient data with CGM, past insulin, and optional carbohydrate features.</p>
+          <div class="table-wrap"><table id="uploadModels"></table></div>
+          <p class="footnote">Research prototype using simulated data; not a treatment recommendation. Only CGM, past insulin, and meal carbohydrate values are model inputs. Simulator risk metrics are excluded.</p>
+        </div>
       </section>
     </main>
 
     <footer class="site-footer">
-      Research prototype · CGM-only forecasting · Not for clinical or treatment use
+    Research prototype · CGM and insulin/meal forecasting · Not for clinical or treatment use
     </footer>
   </div>
 

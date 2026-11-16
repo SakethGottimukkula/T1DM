@@ -14,10 +14,14 @@ const ENDPOINTS = {
   patients: '/v1/patients',
   cases: '/v1/cases',
   predict: '/v1/predict',
+  overallMetrics: '/v1/backtest/overall',
+  patientMetrics: '/v1/backtest/patient',
+  uploadCsv: '/v1/predict/csv',
+  multimodalCsv: '/v1/predict/simglucose/csv',
+  multimodalModels: '/v1/models/simglucose',
 };
 
 const HZ = [30, 60, 90, 120];
-const RMSE = { 30: 20.94, 60: 33.67, 90: 42.44, 120: 48.08 };
 const SAFE = { 30: 98.29, 60: 96.72, 90: 95.14, 120: 93.87 };
 const ZONE_SHARE = {
   30: { A: 86.5, B: 11.79, C: 1.35, D: 0.3, E: 0.06 },
@@ -66,6 +70,11 @@ const mobileQuery = window.matchMedia('(max-width: 860px)');
 const charts = {};
 let clarkeImage = null;
 let statusTimer = 0;
+const patientMetricsCache = new Map();
+const patientMetricsLoading = new Set();
+const patientMetricsFailed = new Set();
+let overallMetrics = null;
+let overallMetricsLoading = false;
 
 const state = {
   view: 'overview',
@@ -118,6 +127,64 @@ function esc(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function initCursorDots() {
+  const canvas = $('#cursorDots');
+  if (!canvas || reduceMotion || window.matchMedia('(pointer: coarse)').matches) return;
+  const ctx = canvas.getContext('2d');
+  const spacing = 22;
+  const radius = 190;
+  const pointer = { x: -1000, y: -1000, targetX: -1000, targetY: -1000, opacity: 0, targetOpacity: 0 };
+  let width = 0;
+  let height = 0;
+  let frame = 0;
+
+  const resize = () => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  };
+
+  const draw = () => {
+    ctx.clearRect(0, 0, width, height);
+    pointer.x += (pointer.targetX - pointer.x) * 0.18;
+    pointer.y += (pointer.targetY - pointer.y) * 0.18;
+    pointer.opacity += (pointer.targetOpacity - pointer.opacity) * 0.12;
+    if (pointer.opacity > 0.005) {
+      for (let y = spacing / 2; y < height; y += spacing) {
+        for (let x = spacing / 2; x < width; x += spacing) {
+          const distance = Math.hypot(x - pointer.x, y - pointer.y);
+          if (distance >= radius) continue;
+          const fade = 1 - distance / radius;
+          ctx.globalAlpha = pointer.opacity * fade * fade * 0.42;
+          ctx.fillStyle = '#22d3ee';
+          ctx.beginPath();
+          ctx.arc(x, y, 1.15, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+    if (pointer.opacity > 0.005 || pointer.targetOpacity > 0) frame = requestAnimationFrame(draw);
+    else frame = 0;
+  };
+
+  window.addEventListener('pointermove', (event) => {
+    if (event.pointerType === 'touch') return;
+    pointer.targetX = event.clientX;
+    pointer.targetY = event.clientY;
+    pointer.targetOpacity = 1;
+    if (!frame) frame = requestAnimationFrame(draw);
+  }, { passive: true });
+  window.addEventListener('pointerleave', () => { pointer.targetOpacity = 0; }, { passive: true });
+  window.addEventListener('blur', () => { pointer.targetOpacity = 0; }, { passive: true });
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
 }
 
 function mulberry32(seed) {
@@ -187,6 +254,18 @@ function riskOf(glucose) {
   if (glucose < 70) return { label: 'Hypoglycemia risk', cls: 'bad' };
   if (glucose > 180) return { label: 'Hyperglycemia risk', cls: 'warn' };
   return { label: 'Low risk', cls: 'ok' };
+}
+
+function forecastRiskOf(forecast) {
+  if (!['A', 'B'].includes(forecast.clarke_zone)) {
+    return {
+      label: 'Unreliable forecast',
+      detail: `Clarke zone ${forecast.clarke_zone} · outside clinically acceptable agreement`,
+      cls: 'warn',
+    };
+  }
+  const risk = riskOf(forecast.predicted);
+  return { ...risk, detail: rangeOf(forecast.predicted).label };
 }
 
 function errorStatus(error) {
@@ -346,6 +425,74 @@ function currentForecast(horizon = state.horizon) {
   return hasForecast() ? horizonsFor(state.caseId)[horizon] : null;
 }
 
+function patientRmse(patient, horizon) {
+  const metrics = patientMetricsCache.get(String(patient));
+  const value = metrics && metrics[String(horizon)] && metrics[String(horizon)].rmse;
+  return Number.isFinite(value) ? value : null;
+}
+
+function patientRmseText(patient, horizon) {
+  const metrics = patientMetricsCache.get(String(patient));
+  const item = metrics && metrics[String(horizon)];
+  const value = item && item.rmse;
+  if (Number.isFinite(value)) return `${value.toFixed(2)} mg/dL`;
+  return patientMetricsLoading.has(String(patient)) ? 'Loading…' : 'Unavailable';
+}
+
+function overallRmseText(horizon) {
+  const item = overallMetrics && overallMetrics[String(horizon)];
+  const value = item && item.rmse;
+  if (Number.isFinite(value)) return `${value.toFixed(2)} mg/dL`;
+  return overallMetricsLoading ? 'Loading…' : 'Unavailable';
+}
+
+function patientMaeText(patient, horizon) {
+  const item = patientMetricsCache.get(String(patient))?.[String(horizon)];
+  if (Number.isFinite(item?.mae)) return `${item.mae.toFixed(2)} mg/dL`;
+  return patientMetricsLoading.has(String(patient)) ? 'Loading…' : 'Unavailable';
+}
+
+function overallMaeText(horizon) {
+  const item = overallMetrics && overallMetrics[String(horizon)];
+  if (Number.isFinite(item?.mae)) return `${item.mae.toFixed(2)} mg/dL`;
+  return overallMetricsLoading ? 'Loading…' : 'Unavailable';
+}
+
+async function loadPatientMetrics(patient) {
+  const id = String(patient);
+  if (patientMetricsCache.has(id) || patientMetricsLoading.has(id)) return;
+  patientMetricsLoading.add(id);
+  patientMetricsFailed.delete(id);
+  renderAll({ animate: false, draw: false });
+  try {
+    const result = await api.getPatientMetrics(id);
+    patientMetricsCache.set(id, result.metrics || {});
+  } catch (error) {
+    patientMetricsFailed.add(id);
+    console.warn(`Could not load RMSE for patient ${id}.`, error.message);
+  } finally {
+    patientMetricsLoading.delete(id);
+    if (String(state.patient) === id) renderAll({ animate: false, draw: false });
+  }
+}
+
+async function loadOverallMetrics() {
+  if (overallMetrics || overallMetricsLoading) return;
+  overallMetricsLoading = true;
+  renderAll({ animate: false, draw: false });
+  try {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.overallMetrics}`);
+    if (!response.ok) throw new Error(`Overall metrics request failed (${response.status})`);
+    const result = await response.json();
+    overallMetrics = result.metrics || {};
+  } catch (error) {
+    console.warn('Could not load overall RMSE.', error.message);
+  } finally {
+    overallMetricsLoading = false;
+    renderAll({ animate: false, draw: false });
+  }
+}
+
 /* -----------------------------------------------------------------------------
    API layer — the only place that knows endpoint paths
    ----------------------------------------------------------------------------- */
@@ -367,6 +514,32 @@ const api = {
     const data = await response.json();
     const list = data.cases || data;
     return Array.isArray(list) ? list : null;
+  },
+
+  async getPatientMetrics(patient) {
+    const response = await fetch(
+      `${API_BASE_URL}${ENDPOINTS.patientMetrics}/${encodeURIComponent(patient)}`
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `Patient metrics failed (${response.status})`);
+    return data;
+  },
+
+  async predictCsv(file, horizon, multimodal = false) {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('horizon', horizon);
+    const endpoint = multimodal ? ENDPOINTS.multimodalCsv : ENDPOINTS.uploadCsv;
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, { method: 'POST', body: form });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `Upload failed (${response.status})`);
+    return data;
+  },
+
+  async getMultimodalModels() {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.multimodalModels}`);
+    if (!response.ok) return null;
+    return response.json();
   },
 
   /**
@@ -831,23 +1004,13 @@ function ensureErrorChart() {
       datasets: [
         {
           type: 'bar',
-          label: 'RMSE (mg/dL)',
-          data: HZ.map((horizon) => RMSE[horizon]),
+          label: `Patient ${state.patient} RMSE (mg/dL)`,
+          data: HZ.map((horizon) => patientRmse(state.patient, horizon)),
           backgroundColor: 'rgba(34, 211, 238, 0.55)',
           borderColor: COLORS.accent,
           borderWidth: 1,
           borderRadius: 6,
           yAxisID: 'y',
-        },
-        {
-          type: 'line',
-          label: 'Clinically safe A+B %',
-          data: HZ.map((horizon) => SAFE[horizon]),
-          borderColor: COLORS.ok,
-          backgroundColor: COLORS.ok,
-          tension: 0.3,
-          pointRadius: 4,
-          yAxisID: 'y1',
         },
       ],
     },
@@ -858,13 +1021,6 @@ function ensureErrorChart() {
       scales: {
         x: axis(''),
         y: { ...axis('RMSE (mg/dL)'), min: 0, max: 60 },
-        y1: {
-          ...axis('A+B %'),
-          min: 90,
-          max: 100,
-          position: 'right',
-          grid: { drawOnChartArea: false, color: COLORS.grid },
-        },
       },
       plugins: {
         legend: { labels: { color: COLORS.mute, boxWidth: 12, usePointStyle: true } },
@@ -954,13 +1110,12 @@ function renderOverview(opts = {}) {
       });
     }
     const item = horizonsFor(sample.id)[horizon];
-    const status = errorStatus(item.error);
-    const range = rangeOf(item.predicted);
+    const assessment = forecastRiskOf(item);
     return stat(
       `${horizon} min forecast`,
       `${mg(item.predicted)} mg/dL`,
-      `Actual ${mg(item.actual)} · error ${mg(item.error)} · ${status.label}`,
-      range.cls,
+      `Actual ${mg(item.actual)} · error ${mg(item.error)} · ${assessment.label}`,
+      assessment.cls,
       {
         ...reveal(opts, index),
         sel: horizon === state.horizon,
@@ -974,9 +1129,12 @@ function renderOverview(opts = {}) {
   renderRisk(opts);
 
   if (ready) {
-    const predictedRange = rangeOf(forecast.predicted);
+    const assessment = forecastRiskOf(forecast);
     const status = errorStatus(forecast.error);
-    $('#interp').innerHTML = `At ${state.horizon} minutes the model projects <b>${mg(forecast.predicted)} mg/dL</b> (${predictedRange.label.toLowerCase()}). The held-out glucose was <b>${mg(forecast.actual)} mg/dL</b>, an absolute error of ${mg(forecast.error)} mg/dL (${status.label.toLowerCase()}, Clarke zone ${forecast.clarke_zone}). This readout uses CGM history only from patient ${esc(sample.patient)} in the OhioT1DM 2020 cohort. It is a research interpretation, not a treatment recommendation.`;
+    const predictionNote = assessment.label === 'Unreliable forecast'
+      ? `This prediction should be treated as unreliable (${assessment.detail.toLowerCase()}).`
+      : `The estimate indicates ${assessment.detail.toLowerCase()}.`;
+    $('#interp').innerHTML = `At ${state.horizon} minutes the model projects <b>${mg(forecast.predicted)} mg/dL</b>. ${predictionNote} The held-out glucose was <b>${mg(forecast.actual)} mg/dL</b>, an absolute error of ${mg(forecast.error)} mg/dL (${status.label.toLowerCase()}, Clarke zone ${forecast.clarke_zone}). This readout uses CGM history only from patient ${esc(sample.patient)} in the OhioT1DM 2020 cohort. It is a research interpretation, not a treatment recommendation.`;
   } else {
     $('#interp').innerHTML = `No forecast has been run for patient ${esc(sample.patient)} (${esc(sample.label)}) yet. Pick a horizon in the <button type="button" class="link-btn" data-go="explorer">Test Explorer</button> and press <b>Run Forecast</b> to see the prediction, the held-out value and the error. Until then only the CGM history is shown.`;
   }
@@ -1015,32 +1173,45 @@ function renderRisk(opts = {}) {
   const lowest = Math.min(...values);
   const highest = Math.max(...values);
   const selected = horizons[state.horizon];
-  const selectedRisk = riskOf(selected.predicted);
+  const selectedRisk = forecastRiskOf(selected);
+  const lowestItem = HZ.map((horizon) => horizons[horizon]).find((item) => item.predicted === lowest);
+  const highestItem = HZ.map((horizon) => horizons[horizon]).find((item) => item.predicted === highest);
+  const lowestAssessment = forecastRiskOf(lowestItem);
+  const highestAssessment = forecastRiskOf(highestItem);
 
   $('#riskSummary').innerHTML = [
     stat('Current status', current.label, `${mg(sample.context.current)} mg/dL`, current.cls, reveal(opts, 0)),
-    stat('Selected risk', selectedRisk.label, `${state.horizon} min · ${mg(selected.predicted)} mg/dL`, selectedRisk.cls, reveal(opts, 1)),
-    stat('Lowest forecast', `${mg(lowest)} mg/dL`, rangeOf(lowest).label, rangeOf(lowest).cls, reveal(opts, 2)),
-    stat('Highest forecast', `${mg(highest)} mg/dL`, rangeOf(highest).label, rangeOf(highest).cls, reveal(opts, 3)),
+    stat('Selected risk', selectedRisk.label, `${state.horizon} min · ${mg(selected.predicted)} mg/dL · ${selectedRisk.detail}`, selectedRisk.cls, reveal(opts, 1)),
+    stat('Lowest forecast', `${mg(lowest)} mg/dL`, lowestAssessment.label, lowestAssessment.cls, reveal(opts, 2)),
+    stat('Highest forecast', `${mg(highest)} mg/dL`, highestAssessment.label, highestAssessment.cls, reveal(opts, 3)),
   ].join('');
 
   $('#riskTrajectory').innerHTML = HZ.map((horizon) => {
     const item = horizons[horizon];
-    const range = rangeOf(item.predicted);
-    return `<div class="risk-chip zone-${range.zone}"><span class="hz">${horizon} min</span><span class="val ${range.cls}">${mg(item.predicted)}</span><span class="zone ${range.cls}">${range.label}</span></div>`;
+    const assessment = forecastRiskOf(item);
+    const zoneClass = ['A', 'B'].includes(item.clarke_zone) ? `zone-${rangeOf(item.predicted).zone}` : 'zone-review';
+    return `<div class="risk-chip ${zoneClass}"><span class="hz">${horizon} min</span><span class="val ${assessment.cls}">${mg(item.predicted)}</span><span class="zone ${assessment.cls}">${assessment.label}</span></div>`;
   }).join('');
 
-  const excursion = HZ.map((horizon) => ({ horizon, value: horizons[horizon].predicted }))
+  const unreliable = HZ.map((horizon) => ({ horizon, item: horizons[horizon] }))
+    .find(({ item }) => !['A', 'B'].includes(item.clarke_zone));
+  const excursion = HZ.map((horizon) => ({ horizon, item: horizons[horizon] }))
+    .filter(({ item }) => ['A', 'B'].includes(item.clarke_zone))
+    .map(({ horizon, item }) => ({ horizon, value: item.predicted }))
     .find((item) => item.value < 70 || item.value > 180);
-  if (!excursion) {
+  if (excursion) {
+    const message = excursion.value < 70 ? 'Low glucose risk signal' : 'High glucose risk signal';
+    const reliabilityNote = unreliable
+      ? ` Another forecast at ${unreliable.horizon} min is unreliable (Clarke zone ${unreliable.item.clarke_zone}).`
+      : '';
+    banner.classList.add(excursion.value < 70 ? 'danger' : 'warn');
+    banner.innerHTML = `<strong>${message} (zone A/B).</strong> Earliest horizon outside range: ${excursion.horizon} min, predicted ${mg(excursion.value)} mg/dL.${reliabilityNote}`;
+  } else if (unreliable) {
+    banner.classList.add('warn');
+    banner.innerHTML = `<strong>Forecast needs review.</strong> The ${unreliable.horizon} min prediction is outside Clarke zones A/B (zone ${unreliable.item.clarke_zone}), so it is too unreliable to label as high or low glucose.`;
+  } else {
     banner.classList.add('ok');
     banner.innerHTML = '<strong>No threshold excursion predicted.</strong> Forecasts from 30 to 120 minutes stay inside 70–180 mg/dL.';
-  } else if (excursion.value < 70) {
-    banner.classList.add('danger');
-    banner.innerHTML = `<strong>Low glucose risk.</strong> Earliest horizon outside range: ${excursion.horizon} min, predicted ${mg(excursion.value)} mg/dL.`;
-  } else {
-    banner.classList.add('warn');
-    banner.innerHTML = `<strong>High glucose risk.</strong> Earliest horizon outside range: ${excursion.horizon} min, predicted ${mg(excursion.value)} mg/dL.`;
   }
 }
 
@@ -1074,7 +1245,7 @@ function renderExplorer(opts = {}) {
 
   if (forecast) {
     const status = errorStatus(forecast.error);
-    const risk = riskOf(forecast.predicted);
+    const risk = forecastRiskOf(forecast);
     results.innerHTML = [
       stat('Predicted', `${mg(forecast.predicted)} mg/dL`, `${state.horizon} min ahead`, rangeOf(forecast.predicted).cls, {
         ...reveal(opts, 0),
@@ -1087,23 +1258,23 @@ function renderExplorer(opts = {}) {
         count: opts.animate ? forecast.actual : null,
         suffix: ' mg/dL',
       }),
-      stat('Absolute error', `${mg(forecast.error)} mg/dL`, status.label, status.cls, {
+      stat('Case RMSE', `${mg(forecast.error)} mg/dL`, `Single held-out case · ${state.horizon} min · ${status.label.toLowerCase()}`, '', {
         ...reveal(opts, 2),
         count: opts.animate ? forecast.error : null,
         decimals: Number.isInteger(round1(forecast.error)) ? 0 : 1,
         suffix: ' mg/dL',
       }),
       stat('Clarke zone', forecast.clarke_zone, 'Selected horizon', ZONE_CLASS[forecast.clarke_zone] || '', reveal(opts, 3)),
-      stat('Risk level', risk.label, rangeOf(forecast.predicted).label, risk.cls, reveal(opts, 4)),
+      stat('Risk level', risk.label, risk.detail, risk.cls, reveal(opts, 4)),
     ].join('');
   } else {
     results.innerHTML = [
-      ['Predicted', `${state.horizon} min ahead`],
-      ['Actual', 'Held-out value'],
-      ['Absolute error', 'Predicted vs actual'],
-      ['Clarke zone', 'Selected horizon'],
-      ['Risk level', 'From the forecast'],
-    ].map(([label, detail]) => stat(label, '—', `${detail} · press Run Forecast`, '', { idle: true })).join('');
+      stat('Predicted', '—', `${state.horizon} min ahead · press Run Forecast`, '', { idle: true }),
+      stat('Actual', '—', 'Held-out value · press Run Forecast', '', { idle: true }),
+      stat('Case RMSE', '—', `${state.horizon} min · Run Forecast to compare predicted and actual glucose`, '', { idle: true }),
+      stat('Clarke zone', '—', 'Selected horizon · press Run Forecast', '', { idle: true }),
+      stat('Risk level', '—', 'From the forecast · press Run Forecast', '', { idle: true }),
+    ].join('');
   }
 
   const context = sample.context;
@@ -1161,31 +1332,38 @@ function renderClinical() {
 
 function renderPerformance() {
   $('#perfCards').innerHTML = HZ.map((horizon) =>
-    stat(`${horizon} min`, `${RMSE[horizon].toFixed(2)} RMSE`, `Clinically safe A+B ${SAFE[horizon].toFixed(2)}%`)
+    stat(`${horizon} min · Overall RMSE`, overallRmseText(horizon), `Patient ${state.patient}: ${patientRmseText(state.patient, horizon)} · A+B overall ${SAFE[horizon].toFixed(2)}%`)
   ).join('');
 
-  $('#hTable').innerHTML = `<tr><th>Horizon</th><th>RMSE</th><th>Clinically safe A+B</th><th>Model</th></tr>${
-    HZ.map((horizon) => `<tr class="${horizon === state.horizon ? 'is-selected' : ''}"><td>${horizon} min</td><td>${RMSE[horizon].toFixed(2)} mg/dL</td><td>${SAFE[horizon].toFixed(2)}%</td><td>XGBoost</td></tr>`).join('')
+  $('#hTable').innerHTML = `<tr><th>Horizon</th><th>Overall RMSE</th><th>Patient ${esc(state.patient)} RMSE</th><th>Clinically safe A+B (overall)</th></tr>${
+    HZ.map((horizon) => `<tr class="${horizon === state.horizon ? 'is-selected' : ''}"><td>${horizon} min</td><td>${overallRmseText(horizon)}</td><td>${patientRmseText(state.patient, horizon)}</td><td>${SAFE[horizon].toFixed(2)}%</td></tr>`).join('')
   }`;
 
-  $('#mTable').innerHTML = `<tr><th>Model</th><th>30 min</th><th>60 min</th><th>90 min</th><th>120 min</th><th>Status</th></tr>
-    <tr><td>XGBoost</td>${HZ.map((horizon) => `<td>${RMSE[horizon].toFixed(2)} · ${SAFE[horizon].toFixed(2)}%</td>`).join('')}<td>Current baseline</td></tr>
-    <tr><td>Transformer + BiLSTM</td><td>—</td><td>—</td><td>—</td><td>—</td><td>Planned</td></tr>`;
+  $('#mTable').innerHTML = `<tr><th>Metric</th><th>30 min</th><th>60 min</th><th>90 min</th><th>120 min</th></tr>
+    <tr><td>Overall RMSE · Ohio test</td>${HZ.map((horizon) => `<td>${overallRmseText(horizon)}</td>`).join('')}</tr>
+    <tr><td>Overall MAE · Ohio test</td>${HZ.map((horizon) => `<td>${overallMaeText(horizon)}</td>`).join('')}</tr>
+    <tr><td>Patient ${esc(state.patient)} RMSE</td>${HZ.map((horizon) => `<td>${patientRmseText(state.patient, horizon)}</td>`).join('')}</tr>
+    <tr><td>Patient ${esc(state.patient)} MAE</td>${HZ.map((horizon) => `<td>${patientMaeText(state.patient, horizon)}</td>`).join('')}</tr>
+    <tr><td>Clinically safe A+B · overall</td>${HZ.map((horizon) => `<td>${SAFE[horizon].toFixed(2)}%</td>`).join('')}</tr>`;
 
-  if (state.view === 'performance') ensureErrorChart();
+  if (state.view === 'performance') {
+    const chart = ensureErrorChart();
+    chart.data.datasets[0].label = `Patient ${state.patient} RMSE (mg/dL)`;
+    chart.data.datasets[0].data = HZ.map((horizon) => patientRmse(state.patient, horizon));
+    chart.update(reduceMotion ? 'none' : undefined);
+  }
 }
 
 function renderModel() {
   const cards = [
-    ['Features used', '18', 'Lags (1, 2, 3, 6, 12), rolling mean and SD at 30–120 min, 5- and 30-minute deltas, plus hour sine/cosine.'],
-    ['Horizons', '4 models', 'One XGBoost model each for 30, 60, 90, and 120 minutes. The selected horizon is the accent step above.'],
-    ['Dataset', 'OhioT1DM', '2020 cohort, six patients, CGM sampled about every 5 minutes. Inputs are CGM history only.'],
-    ['Metrics', 'RMSE · A+B', `Held-out RMSE ${RMSE[30]}–${RMSE[120]} mg/dL. Clinically safe A+B ${SAFE[120]}–${SAFE[30]}%.`],
-    ['Safety evaluation', 'Clarke A–E', 'Zones A and B are generally treated as clinically acceptable. The grid is a research check, not a dosing aid.'],
+    ['Ohio model', '18 CGM features', 'Shared XGBoost models trained on pooled OhioT1DM patient records. Patient groups are kept separate while building time-series features.'],
+    ['SimGlucose model', '28 past-only features', 'Shared models trained across 30 virtual patients: CGM history, past insulin, and past CHO. Missing CHO is zero-filled.'],
+    ['Forecast horizons', '4 models per path', 'Separate 30, 60, 90, and 120 minute models. Current selection: ' + state.horizon + ' minutes.'],
+    ['At prediction time', 'Patient history', 'Each uploaded file supplies the patient-specific input history; model weights are shared across training patients.'],
   ];
   $('#modelCards').innerHTML = cards.map(([label, value, detail]) => stat(label, value, detail)).join('');
-  const accent = $('.node.accent');
-  if (accent) accent.textContent = `XGBoost model · ${state.horizon} min`;
+  $all('[data-model-horizon]').forEach((node) => { node.textContent = String(state.horizon); });
+  paintIcons();
 }
 
 function renderAll(opts = {}) {
@@ -1312,6 +1490,7 @@ function chooseRandomCase() {
   state.patient = sample.patient;
   state.caseId = sample.id;
   syncSelects();
+  loadPatientMetrics(state.patient);
   runForecast();
 }
 
@@ -1389,6 +1568,7 @@ function bindSelects() {
       state.forecastFor = null;
       syncSelects();
       renderAll({ animate: false, draw: true });
+      loadPatientMetrics(state.patient);
     });
   });
 
@@ -1403,6 +1583,7 @@ function bindSelects() {
       state.forecastFor = null;
       syncSelects();
       renderAll({ animate: false, draw: true });
+      loadPatientMetrics(state.patient);
     });
   });
 
@@ -1433,6 +1614,81 @@ function bindChrome() {
   });
   $('#run').addEventListener('click', runForecast);
   $('#rand').addEventListener('click', chooseRandomCase);
+  $('#uploadMode').addEventListener('change', updateUploadHelp);
+  $('#chooseCsv').addEventListener('click', () => $('#uploadCsv').click());
+  $('#uploadCsv').addEventListener('change', () => {
+    $('#uploadFileName').textContent = $('#uploadCsv').files[0]?.name || 'No file selected';
+  });
+  $('#uploadRun').addEventListener('click', uploadAndPredict);
+  renderUploadModels();
+}
+
+function updateUploadHelp() {
+  const multimodal = $('#uploadMode').value === 'multimodal';
+  $('#uploadHelp').textContent = multimodal
+    ? 'CSV needs timestamp, CGM (mg/dL), and insulin (units per row); CHO (grams per row) is optional and defaults to zero. SimGlucose history columns Time, BG, CGM, CHO, insulin are supported.'
+    : 'CSV needs timestamp and glucose (mg/dL), or SimGlucose columns Time and CGM, with at least 25 sequential readings at roughly 5-minute intervals.';
+}
+
+async function renderUploadModels() {
+  const table = $('#uploadModels');
+  if (!table) return;
+  table.innerHTML = '<tr><th>Model family</th><th>Inputs</th><th>Horizons</th><th>Status</th></tr>' +
+    '<tr><td>Ohio XGBoost</td><td>CGM history</td><td>30 / 60 / 90 / 120 min</td><td>Available</td></tr>' +
+    '<tr><td>SimGlucose XGBoost</td><td>CGM + insulin + optional CHO</td><td>30 / 60 / 90 / 120 min</td><td>Checking…</td></tr>';
+  try {
+    const data = await api.getMultimodalModels();
+    const status = data && data.models_loaded ? 'Available' : 'Not trained yet';
+    table.innerHTML = '<tr><th>Model family</th><th>Inputs</th><th>Horizons</th><th>Status</th></tr>' +
+      `<tr><td>Ohio XGBoost</td><td>CGM history</td><td>30 / 60 / 90 / 120 min</td><td>Available</td></tr><tr><td>SimGlucose XGBoost</td><td>CGM + insulin + optional CHO</td><td>30 / 60 / 90 / 120 min</td><td>${status}</td></tr>`;
+  } catch {
+    table.innerHTML = '<tr><th>Model family</th><th>Inputs</th><th>Horizons</th><th>Status</th></tr><tr><td>Ohio XGBoost</td><td>CGM history</td><td>30 / 60 / 90 / 120 min</td><td>Available</td></tr><tr><td>SimGlucose XGBoost</td><td>CGM + insulin + optional CHO</td><td>30 / 60 / 90 / 120 min</td><td>Backend unavailable</td></tr>';
+  }
+}
+
+async function uploadAndPredict() {
+  const file = $('#uploadCsv').files[0];
+  const multimodal = $('#uploadMode').value === 'multimodal';
+  const results = $('#uploadResults');
+  if (!file) {
+    showToast('Choose a CSV file first.', 'warn');
+    return;
+  }
+  const button = $('#uploadRun');
+  const started = performance.now();
+  const delay = 1500 + Math.random() * 1000;
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Running…</span>';
+  results.innerHTML = '<div class="stat"><span class="stat-label">Upload</span><span class="stat-value">Processing…</span><span class="stat-detail">Validating history and running the selected models</span></div>';
+  let data;
+  let requestError;
+  try {
+    data = await api.predictCsv(file, $('#uploadHorizon').value, multimodal);
+  } catch (error) {
+    requestError = error;
+  }
+  const remaining = delay - (performance.now() - started);
+  if (remaining > 0) await sleep(remaining);
+  try {
+    if (requestError) throw requestError;
+    const predictions = data.predictions || [];
+    results.innerHTML = predictions.map((item) => stat(
+      `${item.horizon} min forecast`,
+      `${mg(item.predicted_glucose)} mg/dL`,
+      `Change from latest ${mg(item.change_from_latest)} mg/dL · ${item.zone_label}`,
+      item.zone_label === 'low' ? 'bad' : item.zone_label === 'high' ? 'warn' : 'ok'
+    )).join('');
+    if (multimodal && data.meal_defaulted_to_zero) showToast('No CHO column found; meals were treated as zero.');
+  } catch (error) {
+    results.innerHTML = `<div class="stat"><span class="stat-label">Could not run prediction</span><span class="stat-value">Check CSV</span><span class="stat-detail">${esc(error.message)}</span></div>`;
+  } finally {
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    button.innerHTML = '<i data-lucide="upload" aria-hidden="true"></i><span>Upload &amp; Predict</span>';
+    paintIcons();
+    renderUploadModels();
+  }
 }
 
 function fillPatients() {
@@ -1443,6 +1699,7 @@ function fillPatients() {
 }
 
 async function init() {
+  initCursorDots();
   configureChartDefaults();
   fillPatients();
   state.patient = patients()[0];
@@ -1458,6 +1715,8 @@ async function init() {
   setDrawer(false);
 
   checkHealth();
+  loadOverallMetrics();
+  loadPatientMetrics(state.patient);
   try {
     await api.getPatients();
     await api.getCases(state.patient);
