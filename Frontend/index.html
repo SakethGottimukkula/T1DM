@@ -1,98 +1,265 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glucose Horizon: CGM-Only Blood Glucose Forecasting</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="https://unpkg.com/lucide@0.383.0/dist/umd/lucide.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Glucose Horizon — CGM-Only Blood Glucose Forecasting</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.453.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
-<aside class="side">
-  <div class="brand"><i data-lucide="activity"></i><span>GLUCOSE HORIZON</span></div>
-  <nav id="nav">
-    <button data-view="overview" class="active"><i data-lucide="layout-dashboard"></i>Overview</button>
-    <button data-view="forecast"><i data-lucide="line-chart"></i>Glucose Forecast</button>
-    <button data-view="explorer"><i data-lucide="flask-conical"></i>Test Explorer</button>
-    <button data-view="clinical"><i data-lucide="stethoscope"></i>Clinical Analysis</button>
-    <button data-view="performance"><i data-lucide="gauge"></i>Performance</button>
-    <button data-view="model"><i data-lucide="network"></i>Model</button>
-  </nav>
-  <div class="picker">
-    <label>Patient<select class="sel-patient"></select></label>
-    <label>Test case<select class="sel-case"></select></label>
+  <!-- Mobile top bar -->
+  <header class="mobile-bar" role="banner">
+    <button type="button" class="icon-btn" id="menuToggle" aria-label="Open navigation menu" aria-expanded="false" aria-controls="sidebar">
+      <i data-lucide="menu"></i>
+    </button>
+    <div class="brand brand--compact">
+      <i data-lucide="activity" aria-hidden="true"></i>
+      <span>GLUCOSE HORIZON</span>
+    </div>
+    <span class="demo-badge" id="demoBadgeMobile" hidden>Demo data</span>
+  </header>
+
+  <div class="backdrop" id="backdrop" hidden></div>
+
+  <aside class="sidebar" id="sidebar" aria-label="Primary">
+    <div class="brand">
+      <i data-lucide="activity" aria-hidden="true"></i>
+      <span>GLUCOSE HORIZON</span>
+    </div>
+
+    <nav id="nav" aria-label="Views">
+      <button type="button" data-view="overview" class="active" aria-current="page">
+        <i data-lucide="layout-dashboard" aria-hidden="true"></i>Overview
+      </button>
+      <button type="button" data-view="forecast">
+        <i data-lucide="chart-line" aria-hidden="true"></i>Glucose Forecast
+      </button>
+      <button type="button" data-view="explorer">
+        <i data-lucide="flask-conical" aria-hidden="true"></i>Test Explorer
+      </button>
+      <button type="button" data-view="clinical">
+        <i data-lucide="stethoscope" aria-hidden="true"></i>Clinical Analysis
+      </button>
+      <button type="button" data-view="performance">
+        <i data-lucide="gauge" aria-hidden="true"></i>Performance
+      </button>
+      <button type="button" data-view="model">
+        <i data-lucide="network" aria-hidden="true"></i>Model
+      </button>
+    </nav>
+
+    <div class="picker">
+      <label>Patient
+        <select class="sel-patient" aria-label="Select patient"></select>
+      </label>
+      <label>Test case
+        <select class="sel-case" aria-label="Select test case"></select>
+      </label>
+      <span class="demo-badge" id="demoBadge" hidden>Demo data</span>
+      <div class="api-status" id="apiStatus" role="status" aria-live="polite"></div>
+    </div>
+  </aside>
+
+  <div class="shell">
+    <main id="main">
+      <!-- 1. Overview -->
+      <section id="v-overview" class="view active" aria-labelledby="overview-title">
+        <header class="view-header">
+          <h1 id="overview-title">CGM-Only Blood Glucose Forecasting</h1>
+          <p>
+            Predicts future glucose from CGM-only history on the OhioT1DM 2020 cohort,
+            evaluating 30 / 60 / 90 / 120 minute forecast horizons.
+          </p>
+        </header>
+
+        <div class="grid4" id="summary"></div>
+
+        <div class="card">
+          <h2>Actual vs predicted trajectory</h2>
+          <div class="chart"><canvas id="cMain" aria-label="Actual versus predicted glucose trajectory chart"></canvas></div>
+        </div>
+
+        <div class="grid4" id="fcards"></div>
+
+        <div class="card">
+          <h2>Forecast Risk &amp; Alerts</h2>
+          <div class="grid4" id="riskSummary"></div>
+          <div class="risk-strip" id="riskTrajectory" aria-label="Glucose zone risk across horizons"></div>
+          <div class="alert-banner" id="riskAlert" role="status"></div>
+          <p class="footnote">
+            Forecast-based research interpretation only; not medical advice or a treatment recommendation.
+          </p>
+        </div>
+
+        <div class="card">
+          <h2>Status and interpretation</h2>
+          <p id="interp" class="interp"></p>
+        </div>
+      </section>
+
+      <!-- 2. Glucose Forecast -->
+      <section id="v-forecast" class="view" aria-labelledby="forecast-title" hidden>
+        <header class="view-header">
+          <h1 id="forecast-title">Glucose Forecast</h1>
+          <p>
+            History, a now marker, and the future region showing forecast versus actual held-out value,
+            with the 70–180 mg/dL target range shaded.
+          </p>
+        </header>
+
+        <div class="card">
+          <div class="chart tall"><canvas id="cDetail" aria-label="Detailed glucose forecast chart"></canvas></div>
+        </div>
+
+        <div class="card">
+          <h2>Error by horizon</h2>
+          <div class="table-wrap">
+            <table id="errTable"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Test Explorer -->
+      <section id="v-explorer" class="view" aria-labelledby="explorer-title" hidden>
+        <header class="view-header">
+          <h1 id="explorer-title">Test Explorer</h1>
+          <p>
+            Select a predefined held-out CGM sample from the OhioT1DM 2020 cohort.
+            Inputs are not manually editable.
+          </p>
+        </header>
+
+        <div class="card controls">
+          <label>Patient
+            <select class="sel-patient" aria-label="Select patient in explorer"></select>
+          </label>
+          <label>Test case
+            <select class="sel-case" aria-label="Select test case in explorer"></select>
+          </label>
+          <label>Horizon
+            <select id="selH" aria-label="Forecast horizon">
+              <option value="30">30 min</option>
+              <option value="60" selected>60 min</option>
+              <option value="90">90 min</option>
+              <option value="120">120 min</option>
+            </select>
+          </label>
+          <button type="button" class="btn primary" id="run" aria-label="Run forecast">
+            <i data-lucide="play" aria-hidden="true"></i><span>Run Forecast</span>
+          </button>
+          <button type="button" class="btn" id="rand" aria-label="Pick a random test case and run forecast">
+            <i data-lucide="shuffle" aria-hidden="true"></i><span>Random Test Case</span>
+          </button>
+        </div>
+
+        <div class="grid5" id="results" aria-live="polite"></div>
+
+        <div class="card">
+          <h2>CGM context</h2>
+          <p class="muted">CGM-derived context for this forecast window. Not treatment recommendations.</p>
+          <div class="grid5" id="ctx"></div>
+          <h3>Recent events</h3>
+          <ul id="events"></ul>
+        </div>
+      </section>
+
+      <!-- 4. Clinical Analysis -->
+      <section id="v-clinical" class="view" aria-labelledby="clinical-title" hidden>
+        <header class="view-header">
+          <h1 id="clinical-title">Clinical Analysis</h1>
+          <p>
+            Clinical-safety evaluation using Clarke Error Grid analysis.
+            This research prototype does not provide treatment or insulin recommendations.
+          </p>
+        </header>
+
+        <div class="card">
+          <h2>Glucose range</h2>
+          <div id="range" class="range-wrap"></div>
+          <p id="rangeNote" class="muted"></p>
+        </div>
+
+        <div class="two">
+          <div class="card">
+            <h2>Clarke Error Grid</h2>
+            <div class="chart sq"><canvas id="cClarke" aria-label="Clarke Error Grid scatter chart"></canvas></div>
+          </div>
+          <div class="card">
+            <h2>Zone distribution</h2>
+            <div id="zones"></div>
+            <p class="muted">
+              Zones A and B are generally treated as clinically acceptable in the literature.
+              Demo points only; the selected case is outlined in cyan.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. Performance -->
+      <section id="v-performance" class="view" aria-labelledby="perf-title" hidden>
+        <header class="view-header">
+          <h1 id="perf-title">Performance</h1>
+          <p>
+            CGM-only forecasting results on the OhioT1DM 2020 held-out test set.
+            RMSE (mg/dL) and clinically safe A+B percentages by horizon.
+          </p>
+        </header>
+
+        <div class="grid4" id="perfCards"></div>
+
+        <div class="two">
+          <div class="card">
+            <h2>Horizon-wise performance</h2>
+            <div class="table-wrap"><table id="hTable"></table></div>
+          </div>
+          <div class="card">
+            <h2>Error vs horizon</h2>
+            <div class="chart"><canvas id="cErr" aria-label="Error versus horizon chart"></canvas></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Model comparison</h2>
+          <div class="table-wrap"><table id="mTable"></table></div>
+        </div>
+      </section>
+
+      <!-- 6. Model -->
+      <section id="v-model" class="view" aria-labelledby="model-title" hidden>
+        <header class="view-header">
+          <h1 id="model-title">Model</h1>
+          <p>
+            CGM-only historical sequences and engineered features feed horizon-specific XGBoost models
+            for 30 / 60 / 90 / 120 minute forecasts.
+          </p>
+        </header>
+
+        <div class="flow" aria-label="Model pipeline">
+          <div class="node">Historical CGM sequence</div>
+          <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+          <div class="node">CGM-derived feature engineering</div>
+          <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+          <div class="node accent">XGBoost model for selected horizon</div>
+          <div class="flow-arrow" aria-hidden="true"><i data-lucide="arrow-down"></i></div>
+          <div class="node">Future glucose prediction</div>
+        </div>
+
+        <div class="grid5" id="modelCards"></div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      Research prototype · CGM-only forecasting · Not for clinical or treatment use
+    </footer>
   </div>
-</aside>
 
-<main>
-  <section id="v-overview" class="view active">
-    <header><h1>CGM-Only Blood Glucose Forecasting</h1>
-    <p>Predicts future glucose using only information derived from the CGM signal. The project uses the OhioT1DM 2020 cohort and evaluates 30/60/90/120 minute forecasts from CGM-only history.</p></header>
-    <div class="grid4" id="summary"></div>
-    <div class="card"><h2>Actual vs predicted trajectory</h2><div class="chart"><canvas id="cMain"></canvas></div></div>
-    <div class="grid4" id="fcards"></div>
-    <div class="card"><h2>Forecast Risk &amp; Alerts</h2>
-      <div class="grid4" id="riskSummary"></div>
-      <div id="riskTrajectory" style="margin-top:14px;"></div>
-      <div id="riskAlert" style="margin-top:14px;"></div>
-      <p class="muted" style="margin-top:12px; margin-bottom:0; font-size:12px;">Forecast-based research interpretation only; not medical advice or a treatment recommendation.</p>
-    </div>
-    <div class="card"><h2>Status and interpretation</h2><p id="interp"></p></div>
-  </section>
+  <div class="toast-host" id="toastHost" aria-live="polite" aria-atomic="true"></div>
 
-  <section id="v-forecast" class="view">
-    <header><h1>Glucose forecast</h1><p>History, current time and future for the selected forecast. Prediction uses the recent CGM/glucose history and engineered CGM-derived features. The future region shows the forecast and the actual held-out value.</p></header>
-    <div class="card"><div class="chart tall"><canvas id="cDetail"></canvas></div></div>
-    <div class="card"><h2>Error by horizon</h2><table id="errTable"></table></div>
-  </section>
-
-  <section id="v-explorer" class="view">
-    <header><h1>Test explorer</h1><p>Select a predefined held-out CGM sample from the OhioT1DM 2020 cohort. Values cannot be edited manually.</p></header>
-    <div class="card controls">
-      <label>Patient<select class="sel-patient"></select></label>
-      <label>Test case<select class="sel-case"></select></label>
-      <label>Horizon<select id="selH"><option value="30">30 min</option><option value="60" selected>60 min</option><option value="90">90 min</option><option value="120">120 min</option></select></label>
-      <button class="btn primary" id="run"><i data-lucide="play"></i>Run Forecast</button>
-      <button class="btn" id="rand"><i data-lucide="shuffle"></i>Random Test Case</button>
-    </div>
-    <div class="grid5" id="results"></div>
-    <div class="card"><h2>CGM context</h2><p class="muted">CGM-derived context available for this forecast window. Not treatment recommendations.</p>
-      <div class="grid5" id="ctx"></div><h3>Recent events</h3><ul id="events"></ul></div>
-  </section>
-
-  <section id="v-clinical" class="view">
-    <header><h1>Clinical analysis</h1><p>Clinical-safety evaluation using Clarke Error Grid analysis. This research prototype does not provide treatment or insulin recommendations.</p></header>
-    <div class="card"><h2>Glucose range</h2><div id="range"></div><p id="rangeNote" class="muted"></p></div>
-    <div class="two">
-      <div class="card"><h2>Clarke error grid (demo points)</h2><div class="chart sq"><canvas id="cClarke"></canvas></div></div>
-      <div class="card"><h2>Zone distribution</h2><div id="zones"></div><p class="muted">Zones A and B are generally treated as clinically acceptable in the literature. Demo points only; selected case is outlined in cyan.</p></div>
-    </div>
-  </section>
-
-  <section id="v-performance" class="view">
-    <header><h1>Performance</h1><p>CGM-only forecasting results on the OhioT1DM 2020 held-out test set. RMSE values and clinically safe A+B percentages are shown below.</p></header>
-    <div class="grid4" id="perfCards"></div>
-    <div class="two">
-      <div class="card"><h2>Horizon-wise performance</h2><table id="hTable"></table></div>
-      <div class="card"><h2>Error vs horizon</h2><div class="chart"><canvas id="cErr"></canvas></div></div>
-    </div>
-    <div class="card"><h2>Model comparison </h2><table id="mTable"></table></div>
-  </section>
-
-  <section id="v-model" class="view">
-    <header><h1>Model</h1><p>Final approach uses CGM-only historical glucose sequences and engineered CGM-derived features to train separate horizon-specific XGBoost models.</p></header>
-    <div class="flow">
-      <div class="node">Historical CGM / glucose sequence</div><i data-lucide="arrow-down"></i>
-      <div class="node">CGM-derived feature engineering</div><i data-lucide="arrow-down"></i>
-      <div class="node accent">XGBoost model for selected horizon</div><i data-lucide="arrow-down"></i>
-      <div class="node">Future glucose prediction</div>
-    </div>
-    <div class="grid5" id="modelCards"></div>
-  </section>
-</main>
-<script src="script.js"></script>
+  <script src="script.js"></script>
 </body>
 </html>

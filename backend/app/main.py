@@ -233,11 +233,12 @@ def predict(req: PredictRequest) -> PredictResponse:
     )
 
 
-@app.post("/v1/predict/csv", response_model=PredictResponse)
+@app.post("/v1/predict/csv")
 async def predict_csv(
     file: UploadFile = File(...),
     horizon: str = Form(default="all"),
-) -> PredictResponse:
+    patient_id: str | None = Form(default=None),
+) -> dict:
     store = get_store()
 
     # Parse horizon parameter
@@ -262,18 +263,37 @@ async def predict_csv(
     if "timestamp" not in df.columns or "glucose" not in df.columns:
         raise HTTPException(422, "CSV must contain 'timestamp' and 'glucose' columns.")
 
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"], format="%d-%m-%Y %H:%M:%S"
-    )
-    df = df.sort_values("timestamp").reset_index(drop=True)
+    try:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="%d-%m-%Y %H:%M:%S")
+    except (ValueError, TypeError):
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, f"Could not parse timestamps: {exc}")
 
-    _validate_readings_df(df)
-
-    # If there is a patient_id column, use only the last patient's data
-    # (for simplicity; the API is single-patient anyway)
-    if "patient_id" in df.columns:
-        pid = df["patient_id"].iloc[-1]
-        df = df[df["patient_id"] == pid].reset_index(drop=True)
+    has_patient = "patient_id" in df.columns
+    if not has_patient:
+        df["patient_id"] = "all"
+    df = df.sort_values(["patient_id", "timestamp"]).reset_index(drop=True)
+    patients_available = df["patient_id"].drop_duplicates().tolist()
+    if patient_id is not None and patient_id not in {str(value) for value in patients_available}:
+        raise HTTPException(422, f"patient_id '{patient_id}' not found. Available: {patients_available}")
+    patient_used = patient_id if patient_id is not None else str(patients_available[0])
+    df = df[df["patient_id"].astype(str) == patient_used].sort_values("timestamp").reset_index(drop=True)
+    warnings = {"gaps_outside_3_7_minutes": 0}
+    tail_count = 25
+    if len(df) < tail_count:
+        raise HTTPException(422, f"At least {tail_count} readings required to validate feature history. Got {len(df)}.")
+    if len(df) >= 2:
+        all_diffs = df["timestamp"].diff().dropna().dt.total_seconds()
+        warnings["gaps_outside_3_7_minutes"] = int(((all_diffs < 180) | (all_diffs > 420)).sum())
+    tail = df.tail(tail_count).reset_index(drop=True)
+    diffs = tail["timestamp"].diff().dropna().dt.total_seconds()
+    bad = diffs[(diffs < 180) | (diffs > 420)]
+    if not bad.empty:
+        index = int(bad.index[0])
+        raise HTTPException(422, f"Timestamps should be ~5 minutes apart in feature window. Gap at {tail.loc[index, 'timestamp']}.")
+    df = tail.drop(columns=["patient_id"]).reset_index(drop=True)
 
     df = build_features_single(df)
     last = df.iloc[-1]
@@ -290,11 +310,14 @@ async def predict_csv(
 
     preds = _predict_horizons(store, features_row, latest_glucose, horizons)
 
-    return PredictResponse(
-        predictions=preds,
-        latest_glucose=latest_glucose,
-        timestamp=ts,
-    )
+    return {
+        "predictions": [pred.model_dump() for pred in preds],
+        "latest_glucose": latest_glucose,
+        "timestamp": ts,
+        "patient_used": patient_used,
+        "patients_available": [str(value) for value in patients_available],
+        "warnings": warnings,
+    }
 
 
 @app.post("/v1/backtest", response_model=BacktestResponse)
