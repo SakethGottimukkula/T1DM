@@ -44,7 +44,7 @@ python scripts/train_simglucose_models.py
 
 The default simulation is 30 virtual patients (10 each in adult, adolescent, and child groups) for 35 days at five-minute sampling, about 10,081 raw rows per patient. Set a different duration with `--days N`. The generated CSV is written to `data/simglucose_training.csv`; the four horizon models and feature list are written to `models/simglucose/`.
 
-The script splits by virtual-patient ID to measure generalization: 24 patients are used for a held-out evaluation on six patients. After printing those evaluation RMSEs, it refits the deployment weights on **all 30 patients**. Thus the models used by the upload endpoint learn from the full simulated dataset, while the reported held-out scores describe the 24-patient evaluation models, not the final all-patient weights. Input features use past CGM, insulin, and CHO. `BG` is the target; simulator risk fields are excluded. The held-out results measure performance on simulated virtual patients and do not establish real-patient accuracy.
+The script splits by virtual-patient ID to measure generalization: 24 patients are used for a held-out evaluation on six patients. It saves these evaluation weights under `models/simglucose/evaluation/` for Test Explorer. After scoring them, it refits the deployment weights on **all 30 patients** for upload predictions. Input features use past CGM, insulin, and CHO. `BG` is the target; simulator risk fields are excluded. Held-out results measure performance on simulated virtual patients and do not establish real-patient accuracy.
 
 If the generated CSV already exists and you only need to rebuild the models, skip simulation with:
 
@@ -72,7 +72,7 @@ python scripts/train_simglucose_models.py --reuse-existing
 | `GET` | `/v1/models` | Ohio horizons, feature columns, and loaded models |
 | `GET` | `/v1/models/simglucose` | SimGlucose model load status and feature columns |
 | `GET` | `/v1/simglucose/test/patients` | List six held-out virtual patients available in Test Explorer |
-| `GET` | `/v1/simglucose/test/patient/{patient_id}?horizon=30` | Evaluate one held-out patient with models trained on the other 24 patients |
+| `GET` | `/v1/simglucose/test/patient/{patient_id}?horizon=30&case_index=2` | Evaluate a selected case for one held-out patient with models trained on the other 24 patients |
 | `POST` | `/v1/predict` | Ohio prediction from JSON CGM readings |
 | `POST` | `/v1/predict/csv` | Ohio prediction from a CGM CSV |
 | `POST` | `/v1/predict/simglucose/csv` | SimGlucose prediction from a multimodal CSV |
@@ -82,7 +82,7 @@ python scripts/train_simglucose_models.py --reuse-existing
 
 The backtest endpoints are for OhioT1DM and use the Ohio models and feature generation. They do not evaluate SimGlucose models. `/v1/backtest` expects multipart form fields `file` and `horizon`; the CSV must contain `timestamp`, `glucose`, and `patient_id`. Its timestamps should use `%d-%m-%Y %H:%M:%S`. Supported horizons are 30, 60, 90, and 120 minutes.
 
-The SimGlucose Test Explorer uses the separate evaluation weights in `models/simglucose/evaluation/` and reports patient-specific metrics over valid held-out rows. The upload endpoint continues to use the deployment weights trained on all 30 virtual patients.
+The SimGlucose Test Explorer lists the six held-out IDs from `models/simglucose/evaluation/patient_ids.json`. It offers five case windows per patient (early through latest) and all four horizons. The selected case returns actual and predicted BG, single-case absolute error, and Clarke EGA zone; patient-wide RMSE/MAE are calculated over that patient's valid held-out forecast rows. CGM context cards include recent CGM trend, mean, variability, time in range, and 60-minute insulin/CHO totals. The upload endpoint continues to use the deployment weights trained on all 30 virtual patients.
 
 Example uploaded-file backtest:
 

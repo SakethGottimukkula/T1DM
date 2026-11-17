@@ -80,10 +80,11 @@ The SimGlucose evaluation split is patient-held-out but simulator-based. It does
 ## Frontend sections
 
 - **Overview:** dashboard summary and patient selector. When backend data is unavailable, synthetic demo cases may be shown; the demo's displayed current glucose is not fetched from a selected real Ohio patient.
+- **Test Explorer:** the OhioT1DM panel appears first and keeps its CGM context and recent events with its forecast controls and results. A separate SimGlucose panel follows, clearly labeled as the held-out virtual-patient test set. Choose a virtual patient, a case window, and a horizon; results show predicted and actual glucose, case error, Clarke EGA zone, risk, and the patient-wide RMSE, with matching animated metric cards and CGM/insulin/CHO context.
 - **Performance:** Ohio held-out overall metrics and patient-specific metrics, including RMSE, MAE, and Clarke Error Grid zones. Horizon charts show RMSE; sample-count labels are omitted from the visible metrics table.
 - **Models:** descriptions of the Ohio CGM-only and SimGlucose multimodal model families, their horizons, and data paths.
 - **Upload CGM Data:** large CSV picker on the left, model and horizon controls on the right, and prediction output below. A brief loading state (about 1.5–2.5 seconds minimum) is shown during upload prediction.
-- **Visual details:** animated model cards and a cursor-following dotted background. The cursor effect fades with distance and is disabled for reduced-motion and touch-only contexts.
+- **Visual details:** animated model and forecast metric cards, plus a brighter fluorescent-cyan cursor-dot background that fades with distance and is disabled for reduced-motion and touch-only contexts.
 
 ## CSV upload formats
 
@@ -103,6 +104,8 @@ The SimGlucose route needs trained weights present in `backend/models/simglucose
 | `GET` | `/health` | Backend and Ohio model health/inventory |
 | `GET` | `/v1/models` | Ohio model horizons and features |
 | `GET` | `/v1/models/simglucose` | SimGlucose model load status and features |
+| `GET` | `/v1/simglucose/test/patients` | List held-out SimGlucose patient IDs for Test Explorer |
+| `GET` | `/v1/simglucose/test/patient/{patient_id}?horizon=30&case_index=2` | Return selected case prediction, EGA, and patient-wide metrics from the held-out SimGlucose model |
 | `POST` | `/v1/predict` | Ohio CGM-only prediction from JSON readings |
 | `POST` | `/v1/predict/csv` | Ohio CGM-only prediction from uploaded CSV |
 | `POST` | `/v1/predict/simglucose/csv` | SimGlucose prediction from uploaded CGM/insulin/optional CHO CSV |
