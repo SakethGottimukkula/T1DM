@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 _store: ModelStore | None = None
 _sim_models: dict[int, object] = {}
+_sim_eval_models: dict[int, object] = {}
+_sim_eval_patient_ids: list[str] = []
 
 
 def get_store() -> ModelStore:
@@ -65,12 +68,24 @@ def _load_simglucose_models() -> None:
 
     model_dir = Path(__file__).resolve().parent.parent / "models" / "simglucose"
     _sim_models.clear()
+    _sim_eval_models.clear()
+    _sim_eval_patient_ids.clear()
     for horizon in HORIZONS:
         path = model_dir / f"model_{horizon}.json"
         if path.is_file():
             model = xgb.XGBRegressor()
             model.load_model(str(path))
             _sim_models[horizon] = model
+    eval_dir = model_dir / "evaluation"
+    ids_path = eval_dir / "patient_ids.json"
+    if ids_path.is_file():
+        _sim_eval_patient_ids.extend(json.loads(ids_path.read_text()))
+    for horizon in HORIZONS:
+        path = eval_dir / f"model_{horizon}.json"
+        if path.is_file():
+            model = xgb.XGBRegressor()
+            model.load_model(str(path))
+            _sim_eval_models[horizon] = model
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +285,58 @@ async def predict_simglucose_csv(file: UploadFile = File(...), horizon: str = Fo
                             "change_from_latest": round(predicted - latest, 2), "zone_label": _zone_label(predicted)})
     return {"predictions": predictions, "latest_glucose": latest, "timestamp": str(last["timestamp"]),
             "meal_defaulted_to_zero": meal_defaulted}
+
+
+@app.get("/v1/simglucose/test/patients")
+def simglucose_test_patients() -> dict:
+    if not _sim_eval_patient_ids:
+        raise HTTPException(503, "SimGlucose evaluation models are unavailable; rerun the SimGlucose training script.")
+    return {"patients": _sim_eval_patient_ids, "horizons": sorted(_sim_eval_models)}
+
+
+@app.get("/v1/simglucose/test/patient/{patient_id}")
+def simglucose_test_patient(patient_id: str, horizon: int = 30, case_index: int = 2) -> dict:
+    if patient_id not in _sim_eval_patient_ids:
+        raise HTTPException(404, f"Held-out SimGlucose patient '{patient_id}' not found.")
+    if horizon not in HORIZONS or horizon not in _sim_eval_models:
+        raise HTTPException(422, "horizon must be 30, 60, 90, or 120")
+    csv_path = Path(__file__).resolve().parent.parent / "data" / "simglucose_training.csv"
+    if not csv_path.is_file():
+        raise HTTPException(404, "SimGlucose training dataset is unavailable.")
+    df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+    df = df[df["patient_id"].astype(str) == patient_id].sort_values("timestamp")
+    if df.empty:
+        raise HTTPException(404, f"No SimGlucose records found for patient '{patient_id}'.")
+    df = df.set_index("timestamp").resample("5min").agg({"bg": "mean", "cgm": "mean", "insulin": "sum", "cho": "sum"}).dropna().reset_index()
+    features = build_sim_features(df).dropna(subset=SIM_FEATURE_COLUMNS + [f"target_{horizon}"]).reset_index(drop=True)
+    if features.empty:
+        raise HTTPException(422, "No valid evaluation rows for this patient.")
+    model = _sim_eval_models[horizon]
+    actual = features[f"target_{horizon}"].to_numpy()
+    predicted = model.predict(features[SIM_FEATURE_COLUMNS].to_numpy())
+    case_index = max(0, min(4, case_index))
+    row_index = round(case_index * (len(features) - 1) / 4)
+    selected = features.iloc[row_index]
+    selected_actual = float(actual[row_index])
+    selected_predicted = float(predicted[row_index])
+    _, zone_counts = classify_array([selected_actual], [selected_predicted])
+    context_rows = df[df["timestamp"] <= pd.Timestamp(selected["timestamp"])].tail(36)
+    cgm = context_rows["cgm"].astype(float)
+    insulin_total = float(context_rows["insulin"].tail(12).sum())
+    cho_total = float(context_rows["cho"].tail(12).sum())
+    return {"patient_id": patient_id, "horizon": horizon, "n_rows": len(features),
+            "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 2),
+            "mae": round(float(mean_absolute_error(actual, predicted)), 2),
+            "timestamp": str(selected["timestamp"]), "actual": round(selected_actual, 2),
+            "predicted": round(selected_predicted, 2),
+            "error": round(abs(selected_actual - selected_predicted), 2),
+            "clarke_zone": next((z for z, count in zone_counts.items() if count), "A"),
+            "context": {"current": round(float(cgm.iloc[-1]), 2),
+                        "roc": round(float(cgm.iloc[-1] - cgm.iloc[-4]), 2) if len(cgm) >= 4 else 0.0,
+                        "mean": round(float(cgm.mean()), 2),
+                        "sd": round(float(cgm.std(ddof=0)), 2),
+                        "tir": round(float(((cgm >= 70) & (cgm <= 180)).mean() * 100), 1),
+                        "insulin_60": round(insulin_total, 3), "cho_60": round(cho_total, 2)}}
 
 
 @app.post("/v1/predict", response_model=PredictResponse)

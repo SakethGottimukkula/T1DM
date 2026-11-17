@@ -70,12 +70,20 @@ def simulate_traces(days: int = 35) -> pd.DataFrame:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=35, help="Simulation duration per virtual patient (default: 35, about 10k five-minute rows)")
+    parser.add_argument("--reuse-existing", action="store_true",
+                        help="Train from backend/data/simglucose_training.csv without running the simulator again")
     args = parser.parse_args()
-    data = simulate_traces(days=args.days)
     dataset_path = BACKEND / "data" / "simglucose_training.csv"
-    dataset_path.parent.mkdir(parents=True, exist_ok=True)
-    data.to_csv(dataset_path, index=False)
-    print(f"Saved raw SimGlucose dataset to {dataset_path}", flush=True)
+    if args.reuse_existing:
+        if not dataset_path.is_file():
+            parser.error(f"No existing SimGlucose dataset found at {dataset_path}")
+        data = pd.read_csv(dataset_path, parse_dates=["timestamp"])
+        print(f"Reusing raw SimGlucose dataset at {dataset_path}", flush=True)
+    else:
+        data = simulate_traces(days=args.days)
+        dataset_path.parent.mkdir(parents=True, exist_ok=True)
+        data.to_csv(dataset_path, index=False)
+        print(f"Saved raw SimGlucose dataset to {dataset_path}", flush=True)
     rows = []
     for _, group in data.groupby("patient_id"):
         group = group.set_index("timestamp").sort_index()
@@ -96,15 +104,33 @@ def main() -> None:
           f"held-out rows: {len(test):,} across {test['patient_id'].nunique()} patients.", flush=True)
     out = BACKEND / "models" / "simglucose"
     out.mkdir(parents=True, exist_ok=True)
+    eval_dir = out / "evaluation"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "patient_ids.json").write_text(__import__("json").dumps(sorted(test_patients), indent=2))
+    eval_metrics = {}
+    for hz in HORIZONS:
+        eval_model = XGBRegressor(n_estimators=350, max_depth=7, learning_rate=0.05,
+                                  subsample=0.85, colsample_bytree=0.85, objective="reg:squarederror",
+                                  random_state=42, n_jobs=-1)
+        eval_model.fit(train[SIM_FEATURE_COLUMNS], train[f"target_{hz}"])
+        eval_model.save_model(str(eval_dir / f"model_{hz}.json"))
+        pred = eval_model.predict(test[SIM_FEATURE_COLUMNS])
+        rmse = float(np.sqrt(mean_squared_error(test[f"target_{hz}"], pred)))
+        print(f"{hz:>3} min RMSE on held-out virtual patients: {rmse:.2f} mg/dL")
+        eval_metrics[hz] = rmse
+
+    # Keep the held-out evaluation above, then fit the deployable weights on
+    # every simulated patient so the upload model can learn from all available
+    # simulation traces. These final weights do not have a fresh independent test score.
+    all_data = engineered
+    print(f"Refitting deployment models on all {all_data['patient_id'].nunique()} virtual patients.", flush=True)
     for hz in HORIZONS:
         model = XGBRegressor(n_estimators=350, max_depth=7, learning_rate=0.05,
                              subsample=0.85, colsample_bytree=0.85, objective="reg:squarederror",
                              random_state=42, n_jobs=-1)
-        model.fit(train[SIM_FEATURE_COLUMNS], train[f"target_{hz}"])
+        model.fit(all_data[SIM_FEATURE_COLUMNS], all_data[f"target_{hz}"])
         model.save_model(str(out / f"model_{hz}.json"))
-        pred = model.predict(test[SIM_FEATURE_COLUMNS])
-        rmse = float(np.sqrt(mean_squared_error(test[f"target_{hz}"], pred)))
-        print(f"{hz:>3} min RMSE on held-out virtual patients: {rmse:.2f} mg/dL")
+        print(f"Saved {hz}-min deployment model trained on all patients.", flush=True)
     (out / "feature_columns.json").write_text(__import__("json").dumps(SIM_FEATURE_COLUMNS, indent=2))
     print(f"Saved four horizon models to {out}")
 

@@ -133,11 +133,14 @@
         <header class="view-header">
           <h1 id="explorer-title">Test Explorer</h1>
           <p>
-            Select a predefined held-out CGM sample from the OhioT1DM 2020 cohort.
-            Inputs are not manually editable.
+            Choose a dataset below, then select a patient, test case, and forecast horizon. The selected dataset is shown clearly in each test panel.
           </p>
         </header>
 
+        <div class="card">
+          <h2>OhioT1DM test set</h2>
+          <p class="muted">CGM-only forecasts for Ohio patient records.</p>
+        </div>
         <div class="card controls">
           <label>Patient
             <select class="sel-patient" aria-label="Select patient in explorer"></select>
@@ -164,11 +167,40 @@
         <div class="grid5" id="results" aria-live="polite"></div>
 
         <div class="card">
-          <h2>CGM context</h2>
-          <p class="muted">CGM-derived context for this forecast window. Not treatment recommendations.</p>
+          <h3>Ohio CGM context</h3>
+          <p class="muted">CGM-derived context for the selected Ohio forecast window. Not treatment recommendations.</p>
           <div class="grid5" id="ctx"></div>
-          <h3>Recent events</h3>
-          <ul id="events"></ul>
+          <h3>Recent events</h3><ul id="events"></ul>
+        </div>
+
+        <div class="card">
+          <h2>SimGlucose test set</h2>
+          <p class="muted">Held-out virtual patients. These evaluation models were trained on the other 24 patients; upload predictions use the separate model trained on all 30.</p>
+          <div class="controls">
+            <label>Virtual patient
+              <select id="simTestPatient" aria-label="Select held-out SimGlucose patient"></select>
+            </label>
+            <label>Test case
+              <select id="simTestCase" aria-label="Select SimGlucose test case">
+                <option value="0">Early</option><option value="1">Early-middle</option>
+                <option value="2" selected>Middle</option><option value="3">Late-middle</option><option value="4">Latest</option>
+              </select>
+            </label>
+            <label>Horizon
+              <select id="simTestHorizon" aria-label="SimGlucose test horizon">
+                <option value="30">30 min</option><option value="60">60 min</option>
+                <option value="90">90 min</option><option value="120">120 min</option>
+              </select>
+            </label>
+            <button type="button" class="btn primary" id="runSimTest"><i data-lucide="play" aria-hidden="true"></i><span>Run Forecast</span></button>
+          </div>
+          <div class="grid5" id="simTestResults" aria-live="polite"></div>
+          <div class="card" style="margin-top: 1rem">
+            <h3>CGM context</h3>
+            <p class="muted">Recent CGM, insulin, and meal context for the selected simulated forecast window.</p>
+            <div class="grid5" id="simTestContext"></div>
+            <h3>Recent events</h3><ul id="simTestEvents"></ul>
+          </div>
         </div>
       </section>
 

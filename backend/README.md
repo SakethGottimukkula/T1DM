@@ -44,9 +44,15 @@ python scripts/train_simglucose_models.py
 
 The default simulation is 30 virtual patients (10 each in adult, adolescent, and child groups) for 35 days at five-minute sampling, about 10,081 raw rows per patient. Set a different duration with `--days N`. The generated CSV is written to `data/simglucose_training.csv`; the four horizon models and feature list are written to `models/simglucose/`.
 
-The script splits by virtual-patient ID: 24 patients fit the models, while six held-out patients are used only for evaluation. Input features use past CGM, insulin, and CHO. `BG` is the target; simulator risk fields are excluded. The held-out results measure performance on simulated virtual patients and do not establish real-patient accuracy.
+The script splits by virtual-patient ID to measure generalization: 24 patients are used for a held-out evaluation on six patients. After printing those evaluation RMSEs, it refits the deployment weights on **all 30 patients**. Thus the models used by the upload endpoint learn from the full simulated dataset, while the reported held-out scores describe the 24-patient evaluation models, not the final all-patient weights. Input features use past CGM, insulin, and CHO. `BG` is the target; simulator risk fields are excluded. The held-out results measure performance on simulated virtual patients and do not establish real-patient accuracy.
 
-**Current artifact caveat:** the CSV currently in `data/simglucose_training.csv` has 14,430 rows: 30 patients with 481 rows each, corresponding to a one-day simulation. The currently saved `models/simglucose/` weights were trained from that one-day dataset. The script's 35-day duration is its current default, but existing artifacts do not change until the script completes successfully. Simulation/training may take several minutes. Restart the API after regenerating weights because models are loaded at backend startup.
+If the generated CSV already exists and you only need to rebuild the models, skip simulation with:
+
+```powershell
+python scripts/train_simglucose_models.py --reuse-existing
+```
+
+**Current artifacts:** `data/simglucose_training.csv` currently has 302,430 rows: 30 patients with 10,081 rows each, from a 35-day simulation. The saved `models/simglucose/` deployment weights have now been refit using all 30 patients. Restart the API after regenerating weights because models are loaded at backend startup.
 
 ## CSV prediction formats
 
@@ -65,6 +71,8 @@ The script splits by virtual-patient ID: 24 patients fit the models, while six h
 | `GET` | `/health` | Service health and Ohio model inventory |
 | `GET` | `/v1/models` | Ohio horizons, feature columns, and loaded models |
 | `GET` | `/v1/models/simglucose` | SimGlucose model load status and feature columns |
+| `GET` | `/v1/simglucose/test/patients` | List six held-out virtual patients available in Test Explorer |
+| `GET` | `/v1/simglucose/test/patient/{patient_id}?horizon=30` | Evaluate one held-out patient with models trained on the other 24 patients |
 | `POST` | `/v1/predict` | Ohio prediction from JSON CGM readings |
 | `POST` | `/v1/predict/csv` | Ohio prediction from a CGM CSV |
 | `POST` | `/v1/predict/simglucose/csv` | SimGlucose prediction from a multimodal CSV |
@@ -73,6 +81,8 @@ The script splits by virtual-patient ID: 24 patients fit the models, while six h
 | `GET` | `/v1/backtest/patient/{patient_id}` | Ohio held-out metrics for one patient at all horizons |
 
 The backtest endpoints are for OhioT1DM and use the Ohio models and feature generation. They do not evaluate SimGlucose models. `/v1/backtest` expects multipart form fields `file` and `horizon`; the CSV must contain `timestamp`, `glucose`, and `patient_id`. Its timestamps should use `%d-%m-%Y %H:%M:%S`. Supported horizons are 30, 60, 90, and 120 minutes.
+
+The SimGlucose Test Explorer uses the separate evaluation weights in `models/simglucose/evaluation/` and reports patient-specific metrics over valid held-out rows. The upload endpoint continues to use the deployment weights trained on all 30 virtual patients.
 
 Example uploaded-file backtest:
 

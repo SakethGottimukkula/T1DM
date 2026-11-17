@@ -19,6 +19,8 @@ const ENDPOINTS = {
   uploadCsv: '/v1/predict/csv',
   multimodalCsv: '/v1/predict/simglucose/csv',
   multimodalModels: '/v1/models/simglucose',
+  simTestPatients: '/v1/simglucose/test/patients',
+  simTestPatient: '/v1/simglucose/test/patient',
 };
 
 const HZ = [30, 60, 90, 120];
@@ -161,8 +163,8 @@ function initCursorDots() {
           const distance = Math.hypot(x - pointer.x, y - pointer.y);
           if (distance >= radius) continue;
           const fade = 1 - distance / radius;
-          ctx.globalAlpha = pointer.opacity * fade * fade * 0.42;
-          ctx.fillStyle = '#22d3ee';
+          ctx.globalAlpha = pointer.opacity * fade * fade * 0.56;
+          ctx.fillStyle = '#38eaff';
           ctx.beginPath();
           ctx.arc(x, y, 1.15, 0, Math.PI * 2);
           ctx.fill();
@@ -1614,6 +1616,7 @@ function bindChrome() {
   });
   $('#run').addEventListener('click', runForecast);
   $('#rand').addEventListener('click', chooseRandomCase);
+  $('#runSimTest').addEventListener('click', runSimTest);
   $('#uploadMode').addEventListener('change', updateUploadHelp);
   $('#chooseCsv').addEventListener('click', () => $('#uploadCsv').click());
   $('#uploadCsv').addEventListener('change', () => {
@@ -1621,6 +1624,64 @@ function bindChrome() {
   });
   $('#uploadRun').addEventListener('click', uploadAndPredict);
   renderUploadModels();
+}
+
+async function loadSimTestPatients() {
+  const select = $('#simTestPatient');
+  try {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.simTestPatients}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Held-out SimGlucose models unavailable');
+    select.innerHTML = data.patients.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+  } catch (error) {
+    select.innerHTML = '<option value="">Unavailable</option>';
+    $('#simTestResults').innerHTML = `<div class="stat"><small>SimGlucose evaluation</small><b>Unavailable</b><span>${esc(error.message)}</span></div>`;
+  }
+}
+
+async function runSimTest() {
+  const patient = $('#simTestPatient').value;
+  const horizon = $('#simTestHorizon').value;
+  const caseIndex = $('#simTestCase').value;
+  const results = $('#simTestResults');
+  if (!patient) return;
+  const button = $('#runSimTest');
+  const started = performance.now();
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  results.innerHTML = '<div class="stat loading-status"><small>SimGlucose test</small><b>Running…</b><span>Scoring the selected held-out case</span></div>';
+  try {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.simTestPatient}/${encodeURIComponent(patient)}?horizon=${horizon}&case_index=${caseIndex}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Evaluation failed');
+    const remaining = 1500 + Math.random() * 1000 - (performance.now() - started);
+    if (remaining > 0) await sleep(remaining);
+    const risk = rangeOf(data.predicted);
+    const cards = [
+      ['Predicted', `${mg(data.predicted)} mg/dL`, `${horizon} min ahead`, risk.cls],
+      ['Actual', `${mg(data.actual)} mg/dL`, `${data.timestamp} · held-out value`, ''],
+      ['Case RMSE', `${mg(data.error)} mg/dL`, `Patient-wide RMSE: ${mg(data.rmse)} · ${horizon} min`, ''],
+      ['Clarke zone', data.clarke_zone, `${data.n_rows.toLocaleString()} scored patient readings`, ZONE_CLASS[data.clarke_zone] || ''],
+      ['Risk level', risk.label, 'Based on selected forecast glucose', risk.cls],
+    ];
+    results.innerHTML = cards.map(([label, value, detail, cls], i) => stat(label, value, detail, cls, { reveal: true, delay: i * 70 })).join('');
+    const context = data.context;
+    $('#simTestContext').innerHTML = [
+      stat('Current glucose', `${mg(context.current)} mg/dL`, 'At selected forecast time'),
+      stat('Rate of change', `${context.roc >= 0 ? '+' : ''}${mg(context.roc)} mg/dL`, 'Recent CGM trend'),
+      stat('Recent mean', `${mg(context.mean)} mg/dL`, '3-hour window'),
+      stat('Variability', `${mg(context.sd)} mg/dL`, 'Standard deviation'),
+      stat('Time in range', `${context.tir}%`, '70–180 mg/dL in window'),
+    ].map((card, i) => card.replace('<div class="stat"', `<div class="stat reveal" style="animation-delay:${i * 70}ms"`)).join('');
+    $('#simTestEvents').innerHTML = `<li>Insulin delivered in the last 60 minutes: ${context.insulin_60}</li><li>CHO recorded in the last 60 minutes: ${context.cho_60} g</li>`;
+    paintIcons();
+  } catch (error) {
+    results.innerHTML = `<div class="stat"><small>Evaluation</small><b>Failed</b><span>${esc(error.message)}</span></div>`;
+  } finally {
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    paintIcons();
+  }
 }
 
 function updateUploadHelp() {
@@ -1715,6 +1776,7 @@ async function init() {
   setDrawer(false);
 
   checkHealth();
+  loadSimTestPatients();
   loadOverallMetrics();
   loadPatientMetrics(state.patient);
   try {
