@@ -73,14 +73,20 @@ const charts = {};
 let clarkeImage = null;
 let statusTimer = 0;
 const patientMetricsCache = new Map();
+const patientClinicalCache = new Map();
 const patientMetricsLoading = new Set();
 const patientMetricsFailed = new Set();
+let simTestPatientIds = [];
+let simDashboardRequestId = 0;
 let overallMetrics = null;
 let overallMetricsLoading = false;
 
 const state = {
   view: 'overview',
+  dataset: 'ohio',
   patient: '',
+  simPatient: '',
+  simSample: null,
   caseId: '',
   horizon: 60,
   running: false,
@@ -410,20 +416,24 @@ function casesFor(patient) {
 }
 
 function horizonsFor(caseId) {
+  if (state.dataset === 'sim' && state.simSample) return state.simSample.preds;
   return livePredictions.get(caseId) || getCase(caseId).preds;
 }
 
 function currentSample() {
+  if (state.dataset === 'sim' && state.simSample) return state.simSample;
   return getCase(state.caseId);
 }
 
 // Predictions are only visible after Run Forecast completes for the selected case.
 // Changing patient, case, or horizon clears them again.
 function hasForecast() {
+  if (state.dataset === 'sim') return Boolean(state.simSample);
   return state.forecastFor === state.caseId;
 }
 
 function currentForecast(horizon = state.horizon) {
+  if (state.dataset === 'sim' && state.simSample) return state.simSample.preds[horizon] || null;
   return hasForecast() ? horizonsFor(state.caseId)[horizon] : null;
 }
 
@@ -469,6 +479,7 @@ async function loadPatientMetrics(patient) {
   try {
     const result = await api.getPatientMetrics(id);
     patientMetricsCache.set(id, result.metrics || {});
+    patientClinicalCache.set(id, result.clarke || {});
   } catch (error) {
     patientMetricsFailed.add(id);
     console.warn(`Could not load RMSE for patient ${id}.`, error.message);
@@ -838,11 +849,11 @@ function destroyChart(id) {
 
 function setTrajectory(id, opts = {}) {
   const chart = charts[id];
-  const sample = currentSample();
+  const sample = opts.sample || currentSample();
   if (!chart || !sample) return;
 
-  const ready = hasForecast();
-  const horizons = ready ? horizonsFor(sample.id) : null;
+  const ready = opts.ready ?? (sample === currentSample() && hasForecast());
+  const horizons = ready ? (opts.horizons || horizonsFor(sample.id)) : null;
   const visible = ready ? sample.series : sample.series.filter((point) => point.x <= 0);
   const values = visible.map((point) => point.y)
     .concat(ready ? HZ.map((horizon) => horizons[horizon].predicted) : []);
@@ -1088,6 +1099,13 @@ function reveal(opts, index) {
 
 function renderOverview(opts = {}) {
   const sample = currentSample();
+  const simSelected = state.dataset === 'sim';
+  $('#overview-title').textContent = simSelected
+    ? 'SimGlucose Test Forecasting'
+    : 'CGM-Only Blood Glucose Forecasting';
+  $('#overviewDescription').textContent = simSelected
+    ? 'Held-out SimGlucose virtual patient forecasts using CGM, insulin, and meal history at 30 / 60 / 90 / 120 minute horizons.'
+    : 'Predicts future glucose from CGM-only history on the OhioT1DM 2020 cohort, evaluating 30 / 60 / 90 / 120 minute forecast horizons.';
   const forecast = currentForecast();
   const ready = Boolean(forecast);
   const trend = trendOf(sample);
@@ -1100,8 +1118,8 @@ function renderOverview(opts = {}) {
       suffix: ' mg/dL',
     }),
     stat('Current trend', `${trend.arrow} ${trend.label}`, trend.detail, '', reveal(opts, 1)),
-    stat('Selected patient', `Patient ${sample.patient}`, 'OhioT1DM 2020', '', reveal(opts, 2)),
-    stat('Forecast horizon', `${state.horizon} min`, 'CGM-only forecast', '', reveal(opts, 3)),
+    stat('Selected patient', state.dataset === 'sim' ? sample.patient : `Patient ${sample.patient}`, state.dataset === 'sim' ? 'SimGlucose held-out virtual patient' : 'OhioT1DM demo case', '', reveal(opts, 2)),
+    stat('Forecast horizon', `${state.horizon} min`, state.dataset === 'sim' ? 'SimGlucose evaluation model' : 'Ohio CGM-only model', '', reveal(opts, 3)),
   ].join('');
 
   $('#fcards').innerHTML = HZ.map((horizon, index) => {
@@ -1136,9 +1154,12 @@ function renderOverview(opts = {}) {
     const predictionNote = assessment.label === 'Unreliable forecast'
       ? `This prediction should be treated as unreliable (${assessment.detail.toLowerCase()}).`
       : `The estimate indicates ${assessment.detail.toLowerCase()}.`;
-    $('#interp').innerHTML = `At ${state.horizon} minutes the model projects <b>${mg(forecast.predicted)} mg/dL</b>. ${predictionNote} The held-out glucose was <b>${mg(forecast.actual)} mg/dL</b>, an absolute error of ${mg(forecast.error)} mg/dL (${status.label.toLowerCase()}, Clarke zone ${forecast.clarke_zone}). This readout uses CGM history only from patient ${esc(sample.patient)} in the OhioT1DM 2020 cohort. It is a research interpretation, not a treatment recommendation.`;
+    const source = state.dataset === 'sim'
+      ? `the held-out SimGlucose virtual patient ${esc(sample.patient)}`
+      : `an illustrative OhioT1DM demo scenario for patient ${esc(sample.patient)}`;
+    $('#interp').innerHTML = `At ${state.horizon} minutes the model projects <b>${mg(forecast.predicted)} mg/dL</b>. ${predictionNote} The reference glucose was <b>${mg(forecast.actual)} mg/dL</b>, an absolute error of ${mg(forecast.error)} mg/dL (${status.label.toLowerCase()}, Clarke zone ${forecast.clarke_zone}). This readout uses ${source}. It is a research interpretation, not a treatment recommendation.`;
   } else {
-    $('#interp').innerHTML = `No forecast has been run for patient ${esc(sample.patient)} (${esc(sample.label)}) yet. Pick a horizon in the <button type="button" class="link-btn" data-go="explorer">Test Explorer</button> and press <b>Run Forecast</b> to see the prediction, the held-out value and the error. Until then only the CGM history is shown.`;
+    $('#interp').innerHTML = `No forecast has been run for patient ${esc(sample.patient)} (${esc(sample.label)}) yet. Pick a horizon in the <button type="button" class="link-btn" data-go="explorer">Test Explorer</button> and press <b>Run Forecast</b> to see the prediction, reference value, and error.`;
   }
 
   if (state.view === 'overview') {
@@ -1219,6 +1240,9 @@ function renderRisk(opts = {}) {
 
 function renderForecast(opts = {}) {
   const sample = currentSample();
+  $('#forecastDescription').textContent = state.dataset === 'sim'
+    ? 'SimGlucose held-out glucose history, the selected forecast, and future reference values across the selected virtual patient’s test window.'
+    : 'History, a now marker, and the future region showing forecast versus actual held-out value, with the 70–180 mg/dL target range shaded.';
   const header = '<tr><th>Horizon</th><th>Predicted</th><th>Actual</th><th>Absolute error</th><th>Clarke</th><th>Status</th></tr>';
   if (hasForecast()) {
     const rows = HZ.map((horizon) => {
@@ -1240,8 +1264,9 @@ function renderForecast(opts = {}) {
 
 function renderExplorer(opts = {}) {
   if (state.running) return;
-  const sample = currentSample();
-  const forecast = currentForecast();
+  const sample = getCase(state.caseId);
+  const ohioHorizons = livePredictions.get(sample.id) || sample.preds;
+  const forecast = state.forecastFor === sample.id ? ohioHorizons[state.horizon] : null;
   const results = $('#results');
   results.classList.remove('is-loading');
 
@@ -1291,6 +1316,7 @@ function renderExplorer(opts = {}) {
   $('#events').innerHTML = sample.events.map((event) => `<li>${esc(event)}</li>`).join('');
   $('#selH').value = String(state.horizon);
   if (opts.animate && forecast) animateCounts(results);
+
 }
 
 const ZONE_CLASS = { A: 'ok', B: 'ok', C: 'warn', D: 'warn', E: 'bad' };
@@ -1310,17 +1336,40 @@ function renderClinical() {
       <span class="mk" style="left:${now}%;color:${COLORS.text}">Now ${mg(sample.context.current)}</span>
       ${predMarker}
     </div>`;
-  $('#rangeNote').textContent = `Low is under 70 mg/dL, in range is 70–180, and high is above 180. For ${state.horizon} min, held-out Clarke A+B is ${SAFE[state.horizon]}%. This view does not recommend a treatment.`;
+  const simMetric = state.dataset === 'sim' ? sample.metrics?.[String(state.horizon)] : null;
+  const ohioClinical = state.dataset === 'ohio'
+    ? patientClinicalCache.get(String(sample.patient))?.[String(state.horizon)]
+    : null;
+  const shares = simMetric?.zone_percentages || ohioClinical?.percentages;
+  const abPercent = shares ? shares.A + shares.B : null;
+  const sourceLabel = state.dataset === 'sim' ? 'this held-out SimGlucose patient' : `Ohio patient ${sample.patient}`;
+  $('#rangeNote').textContent = abPercent == null
+    ? `Low is under 70 mg/dL, in range is 70–180, and high is above 180. Loading Clarke EGA for ${sourceLabel} at ${state.horizon} min.`
+    : `Low is under 70 mg/dL, in range is 70–180, and high is above 180. For ${state.horizon} min, ${sourceLabel} Clarke A+B is ${abPercent.toFixed(2)}%. This view does not recommend a treatment.`;
 
-  const shares = ZONE_SHARE[state.horizon];
-  $('#zones').innerHTML = Object.entries(shares).map(([zone, percent]) =>
-    `<div class="zrow"><b>${zone}</b><div><i style="width:${percent}%;background:${ZONE_COLORS[zone]}"></i></div><span>${percent.toFixed(2)}%</span></div>`
-  ).join('');
+  $('#zones').innerHTML = shares
+    ? Object.entries(shares).map(([zone, percent]) =>
+        `<div class="zrow"><b>${zone}</b><div><i style="width:${percent}%;background:${ZONE_COLORS[zone]}"></i></div><span>${percent.toFixed(2)}%</span></div>`
+      ).join('')
+    : '<p class="muted">Patient-specific Clarke zone distribution is loading. If it remains unavailable, check the backend connection.</p>';
+  $('#clarkeNote').textContent = state.dataset === 'sim'
+    ? `Held-out SimGlucose patient ${sample.patient} evaluation points; the selected forecast is outlined in cyan.`
+    : ohioClinical
+      ? `Ohio patient ${sample.patient} held-out test points; the selected forecast is outlined in cyan.`
+      : `Loading held-out test points for Ohio patient ${sample.patient}.`;
 
   if (state.view !== 'clinical') return;
   const chart = ensureClarke();
   if (!chart) return;
   const horizons = forecast ? horizonsFor(sample.id) : null;
+  const cloud = state.dataset === 'sim' && sample.scatter
+    ? sample.scatter[String(state.horizon)]
+    : ohioClinical?.points || [];
+  chart.data.datasets[0].label = state.dataset === 'sim'
+    ? `SimGlucose patient ${sample.patient} test points`
+    : ohioClinical ? `Ohio patient ${sample.patient} test points` : 'Loading Ohio patient test points';
+  chart.data.datasets[0].data = cloud;
+  chart.data.datasets[0].pointBackgroundColor = cloud.map((point) => ZONE_COLORS[point.z]);
   chart.data.datasets[1].data = horizons
     ? HZ.map((horizon) => ({
         x: horizons[horizon].actual,
@@ -1333,6 +1382,32 @@ function renderClinical() {
 }
 
 function renderPerformance() {
+  $('#performanceDescription').textContent = state.dataset === 'sim'
+    ? 'Patient-specific held-out SimGlucose results: RMSE, MAE, and Clarke A+B across all four forecast horizons.'
+    : 'CGM-only forecasting results on the OhioT1DM 2020 held-out test set. Overall and selected-patient RMSE (mg/dL), scored reading counts, and clinically safe A+B percentages by horizon.';
+  if (state.dataset === 'sim' && state.simSample?.metrics) {
+    const patient = state.simSample.patient;
+    const metrics = state.simSample.metrics;
+    $('#perfCards').innerHTML = HZ.map((horizon) => {
+      const metric = metrics[String(horizon)];
+      return stat(`${horizon} min · SimGlucose RMSE`, `${metric.rmse.toFixed(2)} mg/dL`, `Patient ${esc(patient)} · MAE ${metric.mae.toFixed(2)} mg/dL · A+B ${(metric.zone_percentages.A + metric.zone_percentages.B).toFixed(2)}%`);
+    }).join('');
+    $('#hTable').innerHTML = `<tr><th>Horizon</th><th>Patient RMSE</th><th>Patient MAE</th><th>Clarke A+B</th></tr>${HZ.map((horizon) => {
+      const metric = metrics[String(horizon)];
+      return `<tr class="${horizon === state.horizon ? 'is-selected' : ''}"><td>${horizon} min</td><td>${metric.rmse.toFixed(2)} mg/dL</td><td>${metric.mae.toFixed(2)} mg/dL</td><td>${(metric.zone_percentages.A + metric.zone_percentages.B).toFixed(2)}%</td></tr>`;
+    }).join('')}`;
+    $('#mTable').innerHTML = `<tr><th>Metric · SimGlucose patient ${esc(patient)}</th>${HZ.map((horizon) => `<th>${horizon} min</th>`).join('')}</tr>
+      <tr><td>RMSE (mg/dL)</td>${HZ.map((horizon) => `<td>${metrics[String(horizon)].rmse.toFixed(2)}</td>`).join('')}</tr>
+      <tr><td>MAE (mg/dL)</td>${HZ.map((horizon) => `<td>${metrics[String(horizon)].mae.toFixed(2)}</td>`).join('')}</tr>
+      <tr><td>Clarke A+B</td>${HZ.map((horizon) => `<td>${(metrics[String(horizon)].zone_percentages.A + metrics[String(horizon)].zone_percentages.B).toFixed(2)}%</td>`).join('')}</tr>`;
+    if (state.view === 'performance') {
+      const chart = ensureErrorChart();
+      chart.data.datasets[0].label = `SimGlucose patient ${patient} RMSE (mg/dL)`;
+      chart.data.datasets[0].data = HZ.map((horizon) => metrics[String(horizon)].rmse);
+      chart.update(reduceMotion ? 'none' : undefined);
+    }
+    return;
+  }
   $('#perfCards').innerHTML = HZ.map((horizon) =>
     stat(`${horizon} min · Overall RMSE`, overallRmseText(horizon), `Patient ${state.patient}: ${patientRmseText(state.patient, horizon)} · A+B overall ${SAFE[horizon].toFixed(2)}%`)
   ).join('');
@@ -1394,6 +1469,10 @@ function syncSelects() {
   });
   const horizonSelect = $('#selH');
   if (horizonSelect) horizonSelect.value = String(state.horizon);
+  const sidebarPatient = $('#sidebarPatient');
+  if (sidebarPatient) sidebarPatient.value = state.dataset === 'sim'
+    ? `sim|${state.simPatient}`
+    : `ohio|${state.patient}`;
 }
 
 function setBusy(busy) {
@@ -1446,6 +1525,7 @@ function applyPrediction(result) {
 
 async function runForecast() {
   if (state.running) return;
+  state.dataset = 'ohio';
   // Hide any earlier result so nothing is visible until this run finishes.
   state.forecastFor = null;
   renderAll({ animate: false, draw: false });
@@ -1483,6 +1563,7 @@ async function runForecast() {
 
 function chooseRandomCase() {
   if (state.running) return;
+  state.dataset = 'ohio';
   const ids = CASES.map((item) => item.id);
   let next = ids[Math.floor(Math.random() * ids.length)];
   if (ids.length > 1) {
@@ -1559,12 +1640,32 @@ function bindNavigation() {
 }
 
 function bindSelects() {
+  $('#sidebarPatient').addEventListener('change', () => {
+    const [dataset, patient] = $('#sidebarPatient').value.split('|');
+    if (dataset === 'sim') {
+      state.dataset = 'sim';
+      state.simPatient = patient;
+      $('#simTestPatient').value = patient;
+      state.horizon = Number($('#simTestHorizon').value || state.horizon);
+      return;
+    }
+    if (!casesFor(patient).length) return;
+    state.dataset = 'ohio';
+    state.patient = patient;
+    state.caseId = casesFor(patient)[0].id;
+    state.forecastFor = null;
+    syncSelects();
+    renderAll({ animate: false, draw: true });
+    loadPatientMetrics(state.patient);
+  });
+
   $all('.sel-patient').forEach((select) => {
     select.addEventListener('change', () => {
       if (state.running) {
         syncSelects();
         return;
       }
+      state.dataset = 'ohio';
       state.patient = select.value;
       state.caseId = casesFor(state.patient)[0].id;
       state.forecastFor = null;
@@ -1580,6 +1681,7 @@ function bindSelects() {
         syncSelects();
         return;
       }
+      state.dataset = 'ohio';
       state.caseId = select.value;
       state.patient = getCase(state.caseId).patient;
       state.forecastFor = null;
@@ -1594,6 +1696,7 @@ function bindSelects() {
       $('#selH').value = String(state.horizon);
       return;
     }
+    state.dataset = 'ohio';
     state.horizon = Number($('#selH').value);
     state.forecastFor = null;
     renderAll({ animate: false, draw: true });
@@ -1617,6 +1720,14 @@ function bindChrome() {
   $('#run').addEventListener('click', runForecast);
   $('#rand').addEventListener('click', chooseRandomCase);
   $('#runSimTest').addEventListener('click', runSimTest);
+  ['simTestPatient', 'simTestCase', 'simTestHorizon'].forEach((id) => {
+    $(`#${id}`).addEventListener('change', () => {
+      state.dataset = 'sim';
+      state.horizon = Number($('#simTestHorizon').value);
+      state.simPatient = $('#simTestPatient').value;
+      $('#sidebarPatient').value = `sim|${state.simPatient}`;
+    });
+  });
   $('#uploadMode').addEventListener('change', updateUploadHelp);
   $('#chooseCsv').addEventListener('click', () => $('#uploadCsv').click());
   $('#uploadCsv').addEventListener('change', () => {
@@ -1632,51 +1743,100 @@ async function loadSimTestPatients() {
     const response = await fetch(`${API_BASE_URL}${ENDPOINTS.simTestPatients}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Held-out SimGlucose models unavailable');
-    select.innerHTML = data.patients.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+    simTestPatientIds = data.patients || [];
+    select.innerHTML = simTestPatientIds.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+    fillSidebarPatients();
+    select.addEventListener('change', () => {
+      $('#sidebarPatient').value = `sim|${select.value}`;
+      state.dataset = 'sim';
+      state.simPatient = select.value;
+      state.horizon = Number($('#simTestHorizon').value || state.horizon);
+    });
   } catch (error) {
+    simTestPatientIds = [];
+    fillSidebarPatients();
     select.innerHTML = '<option value="">Unavailable</option>';
     $('#simTestResults').innerHTML = `<div class="stat"><small>SimGlucose evaluation</small><b>Unavailable</b><span>${esc(error.message)}</span></div>`;
   }
 }
 
-async function runSimTest() {
-  const patient = $('#simTestPatient').value;
-  const horizon = $('#simTestHorizon').value;
-  const caseIndex = $('#simTestCase').value;
-  const results = $('#simTestResults');
+function buildSimDashboardSample(data) {
+  const id = `sim|${data.patient_id}|${$('#simTestCase').value}`;
+  const predictions = Object.fromEntries(Object.entries(data.predictions).map(([horizon, item]) => [Number(horizon), item]));
+  return {
+    id,
+    patient: data.patient_id,
+    label: `Held-out case · ${data.timestamp}`,
+    series: [...data.series.history, ...data.series.actual_future],
+    preds: predictions,
+    metrics: data.metrics,
+    scatter: data.scatter,
+    context: data.context,
+    events: [`Insulin in the last 60 minutes: ${data.context.insulin_60}`, `CHO in the last 60 minutes: ${data.context.cho_60} g`],
+  };
+}
+
+async function loadSimDashboard() {
+  const patient = state.simPatient || $('#simTestPatient').value;
   if (!patient) return;
-  const button = $('#runSimTest');
-  const started = performance.now();
-  button.disabled = true;
-  button.setAttribute('aria-busy', 'true');
-  results.innerHTML = '<div class="stat loading-status"><small>SimGlucose test</small><b>Running…</b><span>Scoring the selected held-out case</span></div>';
+  state.dataset = 'sim';
+  state.simPatient = patient;
+  const horizon = Number($('#simTestHorizon').value || state.horizon);
+  state.horizon = horizon;
+  const caseIndex = $('#simTestCase').value || 2;
+  const requestId = ++simDashboardRequestId;
+  $('#simTestResults').innerHTML = '<div class="stat"><small>SimGlucose data</small><b>Loading…</b><span>Updating charts for this virtual patient</span></div>';
   try {
     const response = await fetch(`${API_BASE_URL}${ENDPOINTS.simTestPatient}/${encodeURIComponent(patient)}?horizon=${horizon}&case_index=${caseIndex}`);
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || 'Evaluation failed');
-    const remaining = 1500 + Math.random() * 1000 - (performance.now() - started);
-    if (remaining > 0) await sleep(remaining);
-    const risk = rangeOf(data.predicted);
-    const cards = [
-      ['Predicted', `${mg(data.predicted)} mg/dL`, `${horizon} min ahead`, risk.cls],
-      ['Actual', `${mg(data.actual)} mg/dL`, `${data.timestamp} · held-out value`, ''],
-      ['Case RMSE', `${mg(data.error)} mg/dL`, `Patient-wide RMSE: ${mg(data.rmse)} · ${horizon} min`, ''],
-      ['Clarke zone', data.clarke_zone, `${data.n_rows.toLocaleString()} scored patient readings`, ZONE_CLASS[data.clarke_zone] || ''],
-      ['Risk level', risk.label, 'Based on selected forecast glucose', risk.cls],
-    ];
-    results.innerHTML = cards.map(([label, value, detail, cls], i) => stat(label, value, detail, cls, { reveal: true, delay: i * 70 })).join('');
-    const context = data.context;
-    $('#simTestContext').innerHTML = [
-      stat('Current glucose', `${mg(context.current)} mg/dL`, 'At selected forecast time'),
-      stat('Rate of change', `${context.roc >= 0 ? '+' : ''}${mg(context.roc)} mg/dL`, 'Recent CGM trend'),
-      stat('Recent mean', `${mg(context.mean)} mg/dL`, '3-hour window'),
-      stat('Variability', `${mg(context.sd)} mg/dL`, 'Standard deviation'),
-      stat('Time in range', `${context.tir}%`, '70–180 mg/dL in window'),
-    ].map((card, i) => card.replace('<div class="stat"', `<div class="stat reveal" style="animation-delay:${i * 70}ms"`)).join('');
-    $('#simTestEvents').innerHTML = `<li>Insulin delivered in the last 60 minutes: ${context.insulin_60}</li><li>CHO recorded in the last 60 minutes: ${context.cho_60} g</li>`;
-    paintIcons();
+    if (!response.ok) throw new Error(data.detail || 'Could not load SimGlucose patient data');
+    if (requestId !== simDashboardRequestId) return;
+    state.simSample = buildSimDashboardSample(data);
+    renderSimTestResults(data);
+    renderAll({ animate: true, draw: true });
   } catch (error) {
-    results.innerHTML = `<div class="stat"><small>Evaluation</small><b>Failed</b><span>${esc(error.message)}</span></div>`;
+    if (requestId !== simDashboardRequestId) return;
+    $('#simTestResults').innerHTML = `<div class="stat"><small>SimGlucose data</small><b>Unavailable</b><span>${esc(error.message)}</span></div>`;
+  }
+}
+
+function renderSimTestResults(data) {
+  const horizon = Number($('#simTestHorizon').value || state.horizon);
+  const selected = data.predictions[String(horizon)];
+  const risk = rangeOf(selected.predicted);
+  const cards = [
+    ['Predicted', `${mg(selected.predicted)} mg/dL`, `${horizon} min ahead`, risk.cls],
+    ['Actual', `${mg(selected.actual)} mg/dL`, `${data.timestamp} · held-out value`, ''],
+    ['Case error', `${mg(selected.error)} mg/dL`, `Patient-wide RMSE: ${mg(data.metrics[String(horizon)].rmse)} mg/dL`, ''],
+    ['Clarke zone', selected.clarke_zone, `${data.n_rows.toLocaleString()} scored patient readings`, ZONE_CLASS[selected.clarke_zone] || ''],
+    ['Risk level', risk.label, 'Based on selected forecast glucose', risk.cls],
+  ];
+  $('#simTestResults').innerHTML = cards.map(([label, value, detail, cls], i) => stat(label, value, detail, cls, { reveal: true, delay: i * 70 })).join('');
+  const context = data.context;
+  $('#simTestContext').innerHTML = [
+    stat('Current glucose', `${mg(context.current)} mg/dL`, 'At selected forecast time'),
+    stat('Rate of change', `${context.roc >= 0 ? '+' : ''}${mg(context.roc)} mg/dL`, 'Recent CGM trend'),
+    stat('Recent mean', `${mg(context.mean)} mg/dL`, '3-hour window'),
+    stat('Variability', `${mg(context.sd)} mg/dL`, 'Standard deviation'),
+    stat('Time in range', `${context.tir}%`, '70–180 mg/dL in window'),
+  ].map((card, i) => card.replace('<div class="stat"', `<div class="stat reveal" style="animation-delay:${i * 70}ms"`)).join('');
+  $('#simTestEvents').innerHTML = `<li>Insulin delivered in the last 60 minutes: ${context.insulin_60}</li><li>CHO recorded in the last 60 minutes: ${context.cho_60} g</li>`;
+  paintIcons();
+}
+
+async function runSimTest() {
+  const patient = $('#simTestPatient').value;
+  if (!patient) return;
+  const button = $('#runSimTest');
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  try {
+    state.dataset = 'sim';
+    state.simPatient = patient;
+    $('#sidebarPatient').value = `sim|${patient}`;
+    await loadSimDashboard();
+  } catch (error) {
+    $('#simTestResults').innerHTML = `<div class="stat"><small>Evaluation</small><b>Failed</b><span>${esc(error.message)}</span></div>`;
   } finally {
     button.disabled = false;
     button.removeAttribute('aria-busy');
@@ -1757,6 +1917,19 @@ function fillPatients() {
   $all('.sel-patient').forEach((select) => {
     select.innerHTML = options;
   });
+  fillSidebarPatients();
+}
+
+function fillSidebarPatients() {
+  const select = $('#sidebarPatient');
+  if (!select) return;
+  const ohioOptions = patients().map((id) => `<option value="ohio|${esc(id)}">Patient ${esc(id)}</option>`).join('');
+  const simOptions = simTestPatientIds.map((id) => `<option value="sim|${esc(id)}">${esc(id)}</option>`).join('');
+  const previous = select.value;
+  select.innerHTML = `<optgroup label="OhioT1DM patients">${ohioOptions}</optgroup><optgroup label="SimGlucose held-out patients">${simOptions || '<option value="sim|">Unavailable</option>'}</optgroup>`;
+  select.value = previous && Array.from(select.options).some((option) => option.value === previous)
+    ? previous
+    : `ohio|${state.patient || patients()[0]}`;
 }
 
 async function init() {

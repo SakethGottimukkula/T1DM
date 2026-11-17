@@ -308,29 +308,58 @@ def simglucose_test_patient(patient_id: str, horizon: int = 30, case_index: int 
     if df.empty:
         raise HTTPException(404, f"No SimGlucose records found for patient '{patient_id}'.")
     df = df.set_index("timestamp").resample("5min").agg({"bg": "mean", "cgm": "mean", "insulin": "sum", "cho": "sum"}).dropna().reset_index()
-    features = build_sim_features(df).dropna(subset=SIM_FEATURE_COLUMNS + [f"target_{horizon}"]).reset_index(drop=True)
+    targets = [f"target_{hz}" for hz in HORIZONS]
+    features = build_sim_features(df).dropna(subset=SIM_FEATURE_COLUMNS + targets).reset_index(drop=True)
     if features.empty:
         raise HTTPException(422, "No valid evaluation rows for this patient.")
-    model = _sim_eval_models[horizon]
-    actual = features[f"target_{horizon}"].to_numpy()
-    predicted = model.predict(features[SIM_FEATURE_COLUMNS].to_numpy())
     case_index = max(0, min(4, case_index))
     row_index = round(case_index * (len(features) - 1) / 4)
     selected = features.iloc[row_index]
-    selected_actual = float(actual[row_index])
-    selected_predicted = float(predicted[row_index])
-    _, zone_counts = classify_array([selected_actual], [selected_predicted])
+    horizon_predictions = {}
+    patient_metrics = {}
+    scatter = {}
+    for hz in HORIZONS:
+        actual_values = features[f"target_{hz}"].to_numpy()
+        predicted_values = _sim_eval_models[hz].predict(features[SIM_FEATURE_COLUMNS].to_numpy())
+        labels, zone_counts = classify_array(actual_values.tolist(), predicted_values.tolist())
+        row_actual = float(actual_values[row_index])
+        row_predicted = float(predicted_values[row_index])
+        horizon_predictions[str(hz)] = {
+            "actual": round(row_actual, 2), "predicted": round(row_predicted, 2),
+            "error": round(abs(row_actual - row_predicted), 2),
+            "clarke_zone": labels[row_index],
+        }
+        n = len(actual_values)
+        patient_metrics[str(hz)] = {
+            "rmse": round(float(np.sqrt(mean_squared_error(actual_values, predicted_values))), 2),
+            "mae": round(float(mean_absolute_error(actual_values, predicted_values)), 2),
+            "zone_percentages": {z: round(zone_counts[z] * 100 / n, 2) for z in ["A", "B", "C", "D", "E"]},
+            "n_rows": n,
+        }
+        stride = max(1, int(np.ceil(n / 500)))
+        scatter[str(hz)] = [{"x": round(float(a), 2), "y": round(float(p), 2), "z": zone}
+                           for a, p, zone in zip(actual_values[::stride], predicted_values[::stride], labels[::stride])]
+    selected_prediction = horizon_predictions[str(horizon)]
+    selected_actual = selected_prediction["actual"]
+    selected_predicted = selected_prediction["predicted"]
     context_rows = df[df["timestamp"] <= pd.Timestamp(selected["timestamp"])].tail(36)
     cgm = context_rows["cgm"].astype(float)
     insulin_total = float(context_rows["insulin"].tail(12).sum())
     cho_total = float(context_rows["cho"].tail(12).sum())
+    history = [{"x": (i - len(context_rows) + 1) * 5, "y": round(float(value), 2)}
+               for i, value in enumerate(cgm.tolist())]
+    future_rows = df[df["timestamp"] > pd.Timestamp(selected["timestamp"])].head(24)
+    future = [{"x": (i + 1) * 5, "y": round(float(value), 2)}
+              for i, value in enumerate(future_rows["bg"].tolist())]
     return {"patient_id": patient_id, "horizon": horizon, "n_rows": len(features),
-            "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 2),
-            "mae": round(float(mean_absolute_error(actual, predicted)), 2),
+            "rmse": patient_metrics[str(horizon)]["rmse"],
+            "mae": patient_metrics[str(horizon)]["mae"],
             "timestamp": str(selected["timestamp"]), "actual": round(selected_actual, 2),
             "predicted": round(selected_predicted, 2),
             "error": round(abs(selected_actual - selected_predicted), 2),
-            "clarke_zone": next((z for z, count in zone_counts.items() if count), "A"),
+            "clarke_zone": selected_prediction["clarke_zone"],
+            "predictions": horizon_predictions, "metrics": patient_metrics, "scatter": scatter,
+            "series": {"history": history, "actual_future": future},
             "context": {"current": round(float(cgm.iloc[-1]), 2),
                         "roc": round(float(cgm.iloc[-1] - cgm.iloc[-4]), 2) if len(cgm) >= 4 else 0.0,
                         "mean": round(float(cgm.mean()), 2),
@@ -652,6 +681,7 @@ def backtest_patient_metrics(patient_id: str) -> dict:
     patient_rows = patient_rows.sort_values("timestamp").reset_index(drop=True)
     df_feat = build_features(patient_rows, group_col="patient_id")
     metrics: dict[str, dict[str, float | int]] = {}
+    clarke: dict[str, dict[str, object]] = {}
     for horizon in HORIZONS:
         target_col = f"target_{horizon}"
         valid = df_feat.dropna(subset=FEATURE_COLUMNS + [target_col]).reset_index(drop=True)
@@ -659,10 +689,24 @@ def backtest_patient_metrics(patient_id: str) -> dict:
             raise HTTPException(422, f"Not enough valid test rows for patient '{patient_id}'.")
         actual = valid[target_col].to_numpy()
         predicted = store._models[horizon].predict(valid[FEATURE_COLUMNS].values)  # type: ignore[attr-defined]
+        labels, zone_counts = classify_array(actual.tolist(), predicted.tolist())
+        n_rows = len(actual)
+        zone_percentages = {
+            zone: round(zone_counts[zone] * 100 / n_rows, 2)
+            for zone in ["A", "B", "C", "D", "E"]
+        }
         metrics[str(horizon)] = {
             "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 2),
             "mae": round(float(mean_absolute_error(actual, predicted)), 2),
-            "n_rows": int(len(valid)),
+            "n_rows": int(n_rows),
+        }
+        stride = max(1, int(np.ceil(n_rows / 500)))
+        clarke[str(horizon)] = {
+            "percentages": zone_percentages,
+            "points": [
+                {"x": round(float(a), 2), "y": round(float(p), 2), "z": zone}
+                for a, p, zone in zip(actual[::stride], predicted[::stride], labels[::stride])
+            ],
         }
 
-    return {"patient_id": patient_id, "metrics": metrics}
+    return {"patient_id": patient_id, "metrics": metrics, "clarke": clarke}

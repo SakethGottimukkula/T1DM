@@ -59,7 +59,7 @@
 
     <div class="picker">
       <label>Patient
-        <select class="sel-patient" aria-label="Select patient"></select>
+        <select id="sidebarPatient" aria-label="Select Ohio or SimGlucose patient"></select>
       </label>
       <label>Test case
         <select class="sel-case" aria-label="Select test case"></select>
@@ -75,7 +75,7 @@
       <section id="v-overview" class="view active" aria-labelledby="overview-title">
         <header class="view-header">
           <h1 id="overview-title">CGM-Only Blood Glucose Forecasting</h1>
-          <p>
+          <p id="overviewDescription">
             Predicts future glucose from CGM-only history on the OhioT1DM 2020 cohort,
             evaluating 30 / 60 / 90 / 120 minute forecast horizons.
           </p>
@@ -110,7 +110,7 @@
       <section id="v-forecast" class="view" aria-labelledby="forecast-title" hidden>
         <header class="view-header">
           <h1 id="forecast-title">Glucose Forecast</h1>
-          <p>
+          <p id="forecastDescription">
             History, a now marker, and the future region showing forecast versus actual held-out value,
             with the 70–180 mg/dL target range shaded.
           </p>
@@ -173,7 +173,7 @@
           <h3>Recent events</h3><ul id="events"></ul>
         </div>
 
-        <div class="card">
+        <div class="card" id="simTestSection">
           <h2>SimGlucose test set</h2>
           <p class="muted">Held-out virtual patients. These evaluation models were trained on the other 24 patients; upload predictions use the separate model trained on all 30.</p>
           <div class="controls">
@@ -208,7 +208,7 @@
       <section id="v-clinical" class="view" aria-labelledby="clinical-title" hidden>
         <header class="view-header">
           <h1 id="clinical-title">Clinical Analysis</h1>
-          <p>
+          <p id="performanceDescription">
             Clinical-safety evaluation using Clarke Error Grid analysis.
             This research prototype does not provide treatment or insulin recommendations.
           </p>
@@ -228,9 +228,9 @@
           <div class="card">
             <h2>Zone distribution</h2>
             <div id="zones"></div>
-            <p class="muted">
+            <p id="clarkeNote" class="muted">
               Zones A and B are generally treated as clinically acceptable in the literature.
-              Demo points only; the selected case is outlined in cyan.
+              Patient-specific held-out points are shown; the selected forecast is outlined in cyan.
             </p>
           </div>
         </div>

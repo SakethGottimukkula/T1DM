@@ -382,7 +382,7 @@ h3 {
 }
 
 .grid4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.grid5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.grid5 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
 .grid5.is-loading { display: block; }
 #results { min-height: 108px; }
 
@@ -433,6 +433,7 @@ h3 {
   font-size: clamp(18px, 1.9vw, 24px);
   font-weight: 600;
   line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .stat span {
@@ -440,6 +441,7 @@ h3 {
   margin-top: 5px;
   color: var(--mute);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .stat.reveal {
