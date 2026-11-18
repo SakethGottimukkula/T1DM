@@ -84,6 +84,8 @@ The SimGlucose evaluation split is patient-held-out but simulator-based. It does
 - **Performance:** Ohio held-out overall metrics and patient-specific metrics, including RMSE, MAE, and Clarke Error Grid zones. Horizon charts show RMSE; sample-count labels are omitted from the visible metrics table.
 - **Models:** descriptions of the Ohio CGM-only and SimGlucose multimodal model families, their horizons, and data paths.
 - **Upload CGM Data:** large CSV picker on the left, model and horizon controls on the right, and prediction output below. A brief loading state (about 1.5–2.5 seconds minimum) is shown during upload prediction.
+- **Forecast Agent:** Full-space Groq-powered clinical-research and wellness assistant (`openai/gpt-oss-120b`). Directly connected to the application's actual CGM forecasting pipeline (both held-out Ohio test cases and uploaded CGM CSVs): reasons dynamically over current glucose, rate of change, trends, predicted values, relative changes, actuals, and patient-specific RMSE. Formatted as clinical research reports with styled tables, overview metric cards, callouts, and clean section hierarchies. Features a compact auto-expanding composer (up to 120px; Enter submits, Shift+Enter newline), independent conversation scrolling without nested scrollbars, and a prominent welcome disclaimer transitioning to a pinned sticky banner during conversation. Grounded with narrow guardrails that drop actionable dosing directives while preserving safe educational and wellness guidance.
+- **Wellness Agent:** Groq-powered general wellness assistant providing practical meal ideas, meal plans, and physical activity suggestions tailored to general T1D wellness. Not medical advice; each response includes a mandatory clinical disclaimer.
 - **Visual details:** animated model and forecast metric cards, plus a brighter fluorescent-cyan cursor-dot background that fades with distance and is disabled for reduced-motion and touch-only contexts.
 
 ## CSV upload formats
@@ -109,6 +111,11 @@ The SimGlucose route needs trained weights present in `backend/models/simglucose
 | `POST` | `/v1/predict` | Ohio CGM-only prediction from JSON readings |
 | `POST` | `/v1/predict/csv` | Ohio CGM-only prediction from uploaded CSV |
 | `POST` | `/v1/predict/simglucose/csv` | SimGlucose prediction from uploaded CGM/insulin/optional CHO CSV |
+| `POST` | `/v1/wellness` | Groq-powered general wellness suggestion agent |
+| `GET` | `/agent/health` | Groq forecast agent health & model status |
+| `POST` | `/agent/chat` | Autonomous T1D forecast agent chat with tool execution |
+| `POST` | `/agent/reset` | Reset conversational session memory |
+| `GET/POST` | `/agent/chat/stream` | Server-Sent Events (SSE) token and tool streaming |
 | `POST` | `/v1/backtest` | Ohio backtest for an uploaded CSV and chosen horizon |
 | `GET` | `/v1/backtest/overall` | Ohio held-out overall metrics across horizons |
 | `GET` | `/v1/backtest/patient/{patient_id}` | Ohio held-out metrics for one patient across horizons |

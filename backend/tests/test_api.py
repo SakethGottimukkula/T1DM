@@ -173,3 +173,119 @@ class TestBacktest:
         assert len(data["actual"]) == len(data["timestamps"])
         assert len(data["predicted"]) == len(data["timestamps"])
 
+
+class TestWellness:
+    def test_wellness_missing_key(self, client, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "")
+        r = client.post("/v1/wellness", json={"message": "What is a good low-carb snack?"})
+        assert r.status_code == 503
+        data = r.json()
+        assert "not configured" in data["detail"].lower()
+
+    def test_wellness_validation_error(self, client):
+        r = client.post("/v1/wellness", json={"message": ""})
+        assert r.status_code == 422
+
+        r2 = client.post("/v1/wellness", json={})
+        assert r2.status_code == 422
+
+    def test_wellness_success_prepends_disclaimer(self, client, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test_fake_key_12345")
+        monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "A handful of almonds or celery sticks with peanut butter are great general options."
+                    }
+                }
+            ]
+        }
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_resp
+            r = client.post("/v1/wellness", json={"message": "Suggest some snacks."})
+            assert r.status_code == 200
+            data = r.json()
+            assert "disclaimer" in data
+            assert data["response"].startswith("Disclaimer: This is only a suggestion, not medical advice.")
+            assert "almonds" in data["response"]
+            assert data["model"] == "llama-3.3-70b-versatile"
+            # Ensure fake key is never in response
+            assert "gsk_test_fake_key_12345" not in r.text
+
+    def test_wellness_disclaimer_no_duplication(self, client, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test_fake_key_12345")
+
+        disclaimer = "Disclaimer: This is only a suggestion, not medical advice. Please consult your doctor before following any meal or exercise plan."
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": f"{disclaimer}\n\nHere are some gentle walking ideas."
+                    }
+                }
+            ]
+        }
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_resp
+            r = client.post("/v1/wellness", json={"message": "Suggest walking plan."})
+            assert r.status_code == 200
+            data = r.json()
+            # Count occurrences of disclaimer
+            assert data["response"].count(disclaimer) == 1
+
+    def test_wellness_groq_error_returns_502(self, client, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test_fake_key_12345")
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 500
+        mock_resp.text = "Internal Groq Error"
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_resp
+            r = client.post("/v1/wellness", json={"message": "Meal ideas"})
+            assert r.status_code == 502
+            assert "gsk_test_fake_key_12345" not in r.text
+
+    def test_wellness_gpt_oss_reasoning_tags_stripped(self, client, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test_fake_key_12345")
+        monkeypatch.setenv("GROQ_MODEL", "openai/gpt-oss-120b")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "<think>Evaluating low carb options for T1D management...</think>Here is a grilled chicken salad suggestion."
+                    }
+                }
+            ]
+        }
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_resp
+            r = client.post("/v1/wellness", json={"message": "Dinner ideas"})
+            assert r.status_code == 200
+            data = r.json()
+            assert "<think>" not in data["response"]
+            assert "</think>" not in data["response"]
+            assert "grilled chicken salad" in data["response"]
+            assert data["model"] == "openai/gpt-oss-120b"
+
+

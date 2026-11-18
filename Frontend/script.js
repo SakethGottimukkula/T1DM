@@ -21,6 +21,10 @@ const ENDPOINTS = {
   multimodalModels: '/v1/models/simglucose',
   simTestPatients: '/v1/simglucose/test/patients',
   simTestPatient: '/v1/simglucose/test/patient',
+  wellness: '/v1/wellness',
+  agentChat: '/agent/chat',
+  agentReset: '/agent/reset',
+  agentHealth: '/agent/health',
 };
 
 const HZ = [30, 60, 90, 120];
@@ -96,6 +100,8 @@ const state = {
   usingDemo: true,
   // caseId whose forecast has been run and may be shown. null = nothing run yet.
   forecastFor: null,
+  // Cached active uploaded CSV prediction response
+  lastUploadForecast: null,
 };
 
 /* -----------------------------------------------------------------------------
@@ -506,6 +512,127 @@ async function loadOverallMetrics() {
   }
 }
 
+function getActiveForecastContext() {
+  // 1. Check if there is an active uploaded CSV forecast
+  if (state.lastUploadForecast && state.lastUploadForecast.predictions && state.lastUploadForecast.predictions.length > 0) {
+    const upload = state.lastUploadForecast;
+    const predsMap = {};
+    let latestGlucose = null;
+    let timestamp = null;
+    upload.predictions.forEach((p) => {
+      predsMap[p.horizon] = {
+        predicted: p.predicted_glucose,
+        change: p.change_from_latest,
+        zone: p.zone_label === 'low' ? 'hypoglycemia' : (p.zone_label === 'high' ? 'hyperglycemia' : 'in_range'),
+      };
+      if (latestGlucose === null && p.latest_glucose != null) latestGlucose = p.latest_glucose;
+      if (timestamp === null && p.timestamp) timestamp = p.timestamp;
+    });
+
+    return {
+      has_forecast: true,
+      source: 'upload',
+      patient_id: upload.patient_id || 'Uploaded-CSV',
+      test_case_id: 'csv_upload',
+      timestamp: timestamp || new Date().toISOString(),
+      current_glucose: latestGlucose,
+      predictions: predsMap,
+      range_classification: latestGlucose != null ? (latestGlucose < 70 ? 'hypoglycemia' : (latestGlucose > 180 ? 'hyperglycemia' : 'in_range')) : null,
+      patient_rmse: null,
+    };
+  }
+
+  // 2. Check held-out Ohio test cases or sim
+  const sample = currentSample();
+  const hasRun = hasForecast();
+  const ptId = String(state.patient || (sample && sample.patient) || '559');
+  const caseId = state.caseId || (sample && sample.id) || null;
+
+  // Calculate current glucose & rate of change from sample readings
+  const sampleReadings = readingsFor(sample);
+  let latestGlucose = null;
+  let roc = null;
+  let trend = '→';
+  let timestamp = sample ? sample.timestamp : null;
+
+  if (sampleReadings && sampleReadings.length > 0) {
+    latestGlucose = sampleReadings[sampleReadings.length - 1].glucose;
+    timestamp = sampleReadings[sampleReadings.length - 1].timestamp;
+    if (sampleReadings.length >= 4) {
+      const g0 = sampleReadings[sampleReadings.length - 4].glucose;
+      const g1 = latestGlucose;
+      roc = Math.round(((g1 - g0) / 15.0) * 100) / 100;
+    } else if (sampleReadings.length >= 2) {
+      const g0 = sampleReadings[0].glucose;
+      const g1 = latestGlucose;
+      roc = Math.round(((g1 - g0) / ((sampleReadings.length - 1) * 5.0)) * 100) / 100;
+    }
+    if (roc != null) {
+      if (roc > 1.0) trend = '↑';
+      else if (roc < -1.0) trend = '↓';
+      else trend = '→';
+    }
+  }
+
+  // Patient-specific RMSE (never cohort-wide)
+  const ptMetrics = patientMetricsCache.get(ptId);
+  const patientRmseMap = {};
+  if (ptMetrics) {
+    [30, 60, 90, 120].forEach((hz) => {
+      const m = ptMetrics[String(hz)];
+      if (m && Number.isFinite(m.rmse)) {
+        patientRmseMap[hz] = m.rmse;
+      }
+    });
+  }
+
+  if (!hasRun) {
+    return {
+      has_forecast: false,
+      source: 'held_out',
+      patient_id: ptId,
+      test_case_id: caseId,
+      timestamp,
+      current_glucose: latestGlucose,
+      rate_of_change: roc,
+      trend,
+      range_classification: latestGlucose != null ? (latestGlucose < 70 ? 'hypoglycemia' : (latestGlucose > 180 ? 'hyperglycemia' : 'in_range')) : null,
+      predictions: null,
+      patient_rmse: Object.keys(patientRmseMap).length > 0 ? patientRmseMap : null,
+    };
+  }
+
+  const rawPreds = horizonsFor(caseId);
+  const predsMap = {};
+  [30, 60, 90, 120].forEach((hz) => {
+    const p = rawPreds && rawPreds[hz];
+    if (p) {
+      predsMap[hz] = {
+        predicted: p.predicted,
+        change: latestGlucose != null ? Math.round((p.predicted - latestGlucose) * 10) / 10 : null,
+        actual: p.actual != null ? p.actual : null,
+        error: p.error != null ? p.error : null,
+        clarke_zone: p.clarke_zone || null,
+        zone: p.predicted < 54 ? 'severe_hypoglycemia' : (p.predicted < 70 ? 'hypoglycemia' : (p.predicted > 250 ? 'severe_hyperglycemia' : (p.predicted > 180 ? 'hyperglycemia' : 'in_range'))),
+      };
+    }
+  });
+
+  return {
+    has_forecast: true,
+    source: 'held_out',
+    patient_id: ptId,
+    test_case_id: caseId,
+    timestamp,
+    current_glucose: latestGlucose,
+    rate_of_change: roc,
+    trend,
+    range_classification: latestGlucose != null ? (latestGlucose < 70 ? 'hypoglycemia' : (latestGlucose > 180 ? 'hyperglycemia' : 'in_range')) : null,
+    predictions: predsMap,
+    patient_rmse: Object.keys(patientRmseMap).length > 0 ? patientRmseMap : null,
+  };
+}
+
 /* -----------------------------------------------------------------------------
    API layer — the only place that knows endpoint paths
    ----------------------------------------------------------------------------- */
@@ -553,6 +680,71 @@ const api = {
     const response = await fetch(`${API_BASE_URL}${ENDPOINTS.multimodalModels}`);
     if (!response.ok) return null;
     return response.json();
+  },
+
+  async getWellness(message) {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.wellness}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const err = new Error(data && data.detail ? data.detail : `Request failed (${response.status})`);
+      err.status = response.status;
+      err.detail = data && data.detail;
+      throw err;
+    }
+    return data;
+  },
+
+  async agentHealth() {
+    try {
+      const response = await fetch(`${API_BASE_URL}${ENDPOINTS.agentHealth}`);
+      if (!response.ok) return null;
+      return response.json();
+    } catch {
+      return null;
+    }
+  },
+
+  async agentChat(message, sessionId = 'default') {
+    const forecastContext = getActiveForecastContext();
+    const sample = currentSample();
+    const readings = readingsFor(sample);
+    const patientId = forecastContext && forecastContext.patient_id ? String(forecastContext.patient_id) : String(sample.patient);
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.agentChat}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        message,
+        patient_id: patientId,
+        readings,
+        forecast_context: forecastContext,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const err = new Error(data && data.detail ? data.detail : `Agent request failed (${response.status})`);
+      err.status = response.status;
+      err.detail = data && data.detail;
+      throw err;
+    }
+    return data;
+  },
+
+  async agentReset(sessionId = 'default') {
+    try {
+      const response = await fetch(`${API_BASE_URL}${ENDPOINTS.agentReset}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      return response.json();
+    } catch {
+      return { status: 'error' };
+    }
   },
 
   /**
@@ -1647,6 +1839,7 @@ function bindSelects() {
       state.simPatient = patient;
       $('#simTestPatient').value = patient;
       state.horizon = Number($('#simTestHorizon').value || state.horizon);
+      state.lastUploadForecast = null;
       return;
     }
     if (!casesFor(patient).length) return;
@@ -1654,6 +1847,7 @@ function bindSelects() {
     state.patient = patient;
     state.caseId = casesFor(patient)[0].id;
     state.forecastFor = null;
+    state.lastUploadForecast = null;
     syncSelects();
     renderAll({ animate: false, draw: true });
     loadPatientMetrics(state.patient);
@@ -1669,6 +1863,7 @@ function bindSelects() {
       state.patient = select.value;
       state.caseId = casesFor(state.patient)[0].id;
       state.forecastFor = null;
+      state.lastUploadForecast = null;
       syncSelects();
       renderAll({ animate: false, draw: true });
       loadPatientMetrics(state.patient);
@@ -1685,6 +1880,7 @@ function bindSelects() {
       state.caseId = select.value;
       state.patient = getCase(state.caseId).patient;
       state.forecastFor = null;
+      state.lastUploadForecast = null;
       syncSelects();
       renderAll({ animate: false, draw: true });
       loadPatientMetrics(state.patient);
@@ -1699,6 +1895,7 @@ function bindSelects() {
     state.dataset = 'ohio';
     state.horizon = Number($('#selH').value);
     state.forecastFor = null;
+    state.lastUploadForecast = null;
     renderAll({ animate: false, draw: true });
   });
 }
@@ -1893,8 +2090,17 @@ async function uploadAndPredict() {
   if (remaining > 0) await sleep(remaining);
   try {
     if (requestError) throw requestError;
+    state.lastUploadForecast = data;
     const predictions = data.predictions || [];
-    results.innerHTML = predictions.map((item) => stat(
+    const disclaimerBanner = `
+      <div class="alert-banner disclaimer-banner" style="grid-column: 1 / -1; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.28); border-radius: 8px;">
+        <i data-lucide="shield-alert" style="width: 16px; height: 16px; flex-shrink: 0; color: var(--warn);"></i>
+        <span style="font-size: 12px; line-height: 1.4; color: var(--text);">
+          <strong style="color: var(--warn);">Clinical Research Disclaimer:</strong> Investigational prototype. Predictions are derived solely from CGM history without insulin or carbohydrate/meal data and are not for clinical or treatment use. Consult your diabetes care team.
+        </span>
+      </div>
+    `;
+    results.innerHTML = disclaimerBanner + predictions.map((item) => stat(
       `${item.horizon} min forecast`,
       `${mg(item.predicted_glucose)} mg/dL`,
       `Change from latest ${mg(item.change_from_latest)} mg/dL · ${item.zone_label}`,
@@ -1932,6 +2138,543 @@ function fillSidebarPatients() {
     : `ohio|${state.patient || patients()[0]}`;
 }
 
+function renderMarkdown(text) {
+  if (!text) return '';
+  const lines = text.split('\n');
+  const html = [];
+  let inList = false;
+  let listType = null;
+  let inTable = false;
+  let tableRows = [];
+  let inQuote = false;
+  let quoteLines = [];
+  let isOverviewSection = false;
+  let overviewMetrics = [];
+
+  function flushList() {
+    if (inList) {
+      html.push(listType === 'ol' ? '</ol>' : '</ul>');
+      inList = false;
+      listType = null;
+    }
+  }
+
+  function flushOverviewMetrics() {
+    if (overviewMetrics.length > 0) {
+      let cardsHtml = '<div class="report-metrics-grid">';
+      overviewMetrics.forEach(({ label, rest }) => {
+        let value = rest;
+        let sub = '';
+        const parenMatch = rest.match(/^(.*?)\s*\((.*?)\)$/);
+        const sepMatch = rest.match(/^(.*?)\s*[·|]\s*(.*?)$/);
+        if (parenMatch) {
+          value = parenMatch[1];
+          sub = parenMatch[2];
+        } else if (sepMatch) {
+          value = sepMatch[1];
+          sub = sepMatch[2];
+        }
+        cardsHtml += `
+          <div class="report-metric-card">
+            <span class="report-metric-label">${inlineFormat(esc(label.trim()))}</span>
+            <span class="report-metric-value">${inlineFormat(esc(value.trim()))}</span>
+            ${sub ? `<span class="report-metric-sub">${inlineFormat(esc(sub.trim()))}</span>` : ''}
+          </div>
+        `;
+      });
+      cardsHtml += '</div>';
+      html.push(cardsHtml);
+      overviewMetrics = [];
+    }
+  }
+
+  function flushQuote() {
+    if (inQuote) {
+      const quoteText = quoteLines.join(' ');
+      let calloutClass = 'report-callout';
+      const lower = quoteText.toLowerCase();
+      if (lower.includes('emergency') || lower.includes('critical') || lower.includes('severe')) {
+        calloutClass += ' alert';
+      } else if (lower.includes('warn') || lower.includes('caution') || lower.includes('disclaimer')) {
+        calloutClass += ' warn';
+      }
+      html.push(`<blockquote class="${calloutClass}">${inlineFormat(esc(quoteText))}</blockquote>`);
+      inQuote = false;
+      quoteLines = [];
+    }
+  }
+
+  function parseTableRow(line) {
+    let clean = line.trim();
+    if (clean.startsWith('|')) clean = clean.slice(1);
+    if (clean.endsWith('|')) clean = clean.slice(0, -1);
+    return clean.split('|').map((c) => c.trim());
+  }
+
+  function flushTable() {
+    if (inTable && tableRows.length > 0) {
+      let headerCells = [];
+      let bodyRows = [];
+      let isFirstRowHeader = false;
+
+      if (tableRows.length >= 2 && /^\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/.test(tableRows[1].trim())) {
+        isFirstRowHeader = true;
+        headerCells = parseTableRow(tableRows[0]);
+        for (let i = 2; i < tableRows.length; i++) {
+          bodyRows.push(parseTableRow(tableRows[i]));
+        }
+      } else {
+        for (let i = 0; i < tableRows.length; i++) {
+          bodyRows.push(parseTableRow(tableRows[i]));
+        }
+      }
+
+      let tableHtml = '<div class="report-table-wrap"><table class="report-table">';
+      if (isFirstRowHeader && headerCells.length > 0) {
+        tableHtml += '<thead><tr>' + headerCells.map((c) => `<th>${inlineFormat(esc(c))}</th>`).join('') + '</tr></thead>';
+      }
+      if (bodyRows.length > 0) {
+        tableHtml += '<tbody>';
+        bodyRows.forEach((row) => {
+          tableHtml += '<tr>' + row.map((c) => `<td>${inlineFormat(esc(c))}</td>`).join('') + '</tr>';
+        });
+        tableHtml += '</tbody>';
+      }
+      tableHtml += '</table></div>';
+      html.push(tableHtml);
+
+      inTable = false;
+      tableRows = [];
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    // Table line
+    const isTableLine = line.startsWith('|') && line.endsWith('|') && line.length > 2;
+    if (isTableLine) {
+      flushList();
+      flushOverviewMetrics();
+      flushQuote();
+      inTable = true;
+      tableRows.push(line);
+      continue;
+    } else if (inTable) {
+      flushTable();
+    }
+
+    // Blockquote
+    if (line.startsWith('>')) {
+      flushList();
+      flushOverviewMetrics();
+      inQuote = true;
+      quoteLines.push(line.replace(/^>\s*/, ''));
+      continue;
+    } else if (inQuote) {
+      flushQuote();
+    }
+
+    if (!line) {
+      flushList();
+      flushOverviewMetrics();
+      continue;
+    }
+
+    // Horizontal Rule
+    if (/^(\-{3,}|\*{3,}|_{3,})$/.test(line)) {
+      flushList();
+      flushOverviewMetrics();
+      html.push('<hr class="report-hr" />');
+      continue;
+    }
+
+    // Headings
+    if (line.startsWith('#### ')) {
+      flushList();
+      flushOverviewMetrics();
+      const title = line.slice(5).trim();
+      isOverviewSection = /overview|metric|summary/i.test(title);
+      html.push(`<h4>${inlineFormat(esc(title))}</h4>`);
+      continue;
+    }
+    if (line.startsWith('### ')) {
+      flushList();
+      flushOverviewMetrics();
+      const title = line.slice(4).trim();
+      isOverviewSection = /overview|metric|summary/i.test(title);
+      html.push(`<h3>${inlineFormat(esc(title))}</h3>`);
+      continue;
+    }
+    if (line.startsWith('## ')) {
+      flushList();
+      flushOverviewMetrics();
+      const title = line.slice(3).trim();
+      isOverviewSection = /overview|metric|summary/i.test(title);
+      html.push(`<h2>${inlineFormat(esc(title))}</h2>`);
+      continue;
+    }
+    if (line.startsWith('# ')) {
+      flushList();
+      flushOverviewMetrics();
+      const title = line.slice(2).trim();
+      isOverviewSection = /overview|metric|summary/i.test(title);
+      html.push(`<h2>${inlineFormat(esc(title))}</h2>`);
+      continue;
+    }
+
+    // Check for overview metric bullet
+    if (isOverviewSection) {
+      const metricMatch = line.match(/^[-*]\s+\*\*([^*:]+)\*\*:\s*(.*)$/);
+      if (metricMatch) {
+        overviewMetrics.push({ label: metricMatch[1], rest: metricMatch[2] });
+        continue;
+      } else {
+        flushOverviewMetrics();
+      }
+    }
+
+    // Normal Bullet list item
+    const bulletMatch = line.match(/^[-*]\s+(.*)$/);
+    if (bulletMatch) {
+      if (!inList || listType !== 'ul') {
+        flushList();
+        html.push('<ul>');
+        inList = true;
+        listType = 'ul';
+      }
+      html.push(`<li>${inlineFormat(esc(bulletMatch[1]))}</li>`);
+      continue;
+    }
+
+    // Numbered list item
+    const numberMatch = line.match(/^\d+\.\s+(.*)$/);
+    if (numberMatch) {
+      if (!inList || listType !== 'ol') {
+        flushList();
+        html.push('<ol>');
+        inList = true;
+        listType = 'ol';
+      }
+      html.push(`<li>${inlineFormat(esc(numberMatch[1]))}</li>`);
+      continue;
+    }
+
+    // Normal paragraph
+    flushList();
+    html.push(`<p>${inlineFormat(esc(line))}</p>`);
+  }
+
+  flushList();
+  flushOverviewMetrics();
+  flushQuote();
+  flushTable();
+
+  return html.join('');
+}
+
+function inlineFormat(escapedText) {
+  return escapedText
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function bindWellness() {
+  const form = $('#wellnessForm');
+  const input = $('#wellnessInput');
+  const submitBtn = $('#wellnessSubmit');
+  const stateCard = $('#wellnessStateCard');
+  const stateContent = $('#wellnessStateContent');
+  const responseCard = $('#wellnessResponseCard');
+  const responseContent = $('#wellnessResponseContent');
+  const modelPill = $('#wellnessModelPill');
+  const disclaimerText = $('#wellnessDisclaimerText');
+
+  if (!form) return;
+
+  $all('[data-wellness-prompt]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const prompt = chip.dataset.wellnessPrompt;
+      input.value = prompt;
+      input.focus();
+    });
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const message = input.value.trim();
+    if (!message) return;
+
+    submitBtn.disabled = true;
+    submitBtn.setAttribute('aria-busy', 'true');
+    submitBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Consulting Groq…</span>';
+
+    responseCard.hidden = true;
+    stateCard.hidden = false;
+    stateContent.innerHTML = `
+      <div class="wellness-loading-box">
+        <div class="wellness-loading-spinner" aria-hidden="true"></div>
+        <strong>Generating Wellness Suggestions…</strong>
+        <span class="muted">Querying Groq with Type 1 Diabetes wellness safety guidelines.</span>
+      </div>
+    `;
+
+    try {
+      const data = await api.getWellness(message);
+
+      stateCard.hidden = true;
+      responseCard.hidden = false;
+      modelPill.textContent = data.model || 'Groq';
+      if (data.disclaimer) {
+        disclaimerText.textContent = data.disclaimer;
+      }
+
+      let bodyText = data.response || '';
+      const disclaimer = data.disclaimer || 'Disclaimer: This is only a suggestion, not medical advice. Please consult your doctor before following any meal or exercise plan.';
+      if (bodyText.toLowerCase().startsWith(disclaimer.toLowerCase())) {
+        bodyText = bodyText.slice(disclaimer.length).trim();
+      }
+
+      responseContent.innerHTML = renderMarkdown(bodyText);
+      paintIcons();
+
+      if (mobileQuery.matches) {
+        responseCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    } catch (error) {
+      responseCard.hidden = true;
+      stateCard.hidden = false;
+
+      if (error.status === 503) {
+        stateContent.innerHTML = `
+          <div class="wellness-missing-key-box" role="alert">
+            <i data-lucide="key" aria-hidden="true"></i>
+            <h3>Groq API Key Not Configured</h3>
+            <p>The wellness suggestion agent requires a Groq API key on the backend. Please configure <code>GROQ_API_KEY</code> in your environment or <code>.env</code> file, then restart the backend service.</p>
+            <p class="muted">You can obtain a free Groq API key at <a href="https://console.groq.com" target="_blank" rel="noopener" style="color: var(--accent); text-decoration: underline;">console.groq.com</a>.</p>
+          </div>
+        `;
+      } else {
+        stateContent.innerHTML = `
+          <div class="wellness-error-box" role="alert">
+            <i data-lucide="alert-octagon" aria-hidden="true"></i>
+            <h3>Unable to Retrieve Suggestions</h3>
+            <p>${esc(error.message || 'An error occurred while connecting to Groq. Please check your backend connection and try again.')}</p>
+            <button type="button" class="btn primary" id="wellnessRetryBtn" style="margin-top: 8px;">
+              <i data-lucide="refresh-cw" aria-hidden="true"></i><span>Try Again</span>
+            </button>
+          </div>
+        `;
+        const retryBtn = $('#wellnessRetryBtn');
+        if (retryBtn) {
+          retryBtn.addEventListener('click', () => {
+            form.requestSubmit();
+          });
+        }
+      }
+      paintIcons();
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.removeAttribute('aria-busy');
+      submitBtn.innerHTML = '<i data-lucide="send" aria-hidden="true"></i><span>Get Suggestions</span>';
+      paintIcons();
+    }
+  });
+}
+
+let currentAgentSessionId = 'session_' + Math.random().toString(36).substring(2, 9);
+
+function bindAgentChat() {
+  const form = $('#agentChatForm');
+  const input = $('#agentInput');
+  const sendBtn = $('#agentSendBtn');
+  const thread = $('#agentThread');
+  const typing = $('#agentTyping');
+  const typingStatus = $('#agentTypingStatus');
+  const resetBtn = $('#agentResetBtn');
+  const headerModel = $('#agentHeaderModel');
+  const onlineDot = $('#agentOnlineDot');
+  const stickyDisclaimer = $('#agentStickyDisclaimer');
+
+  if (!form) return;
+
+  const autoResizeInput = () => {
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  };
+
+  input.addEventListener('input', autoResizeInput);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  api.agentHealth().then((health) => {
+    if (health) {
+      if (headerModel) headerModel.textContent = health.model || 'openai/gpt-oss-120b';
+      if (onlineDot) {
+        onlineDot.className = health.groq_configured ? 'dot ok' : 'dot degraded';
+      }
+    }
+  });
+
+  $all('[data-agent-prompt]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      input.value = chip.dataset.agentPrompt;
+      autoResizeInput();
+      input.focus();
+    });
+  });
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      resetBtn.disabled = true;
+      try {
+        await api.agentReset(currentAgentSessionId);
+        currentAgentSessionId = 'session_' + Math.random().toString(36).substring(2, 9);
+        if (stickyDisclaimer) stickyDisclaimer.hidden = true;
+        thread.innerHTML = `
+          <div class="agent-msg assistant">
+            <div class="msg-avatar"><i data-lucide="bot"></i></div>
+            <div class="msg-content">
+              <div class="msg-body">
+                <p>Hello! I am your <strong>T1D Forecasting &amp; Wellness Assistant</strong>, powered by Groq (<code>openai/gpt-oss-120b</code>) and your calibrated OhioT1DM XGBoost models.</p>
+                <p>I can analyze your blood glucose trajectory across 30, 60, 90, and 120-minute horizons, and provide rich, in-depth guidance on:</p>
+                <ul>
+                  <li><strong>🥗 Meal Data &amp; Nutrition Strategy:</strong> Low-GI carbohydrate pacing, protein/fiber pairing, and practical meal plans to keep glucose in range.</li>
+                  <li><strong>🏃 Workout &amp; Physical Activity Routines:</strong> Safe aerobic and resistance routines, pre-workout checks, and exercise pacing for steady glucose.</li>
+                  <li><strong>⚡ Immediate Hypo Triage (&lt;70 or &lt;54 mg/dL):</strong> Step-by-step <em>Rule of 15</em> fast-acting carb recovery and critical severe hypo protocols.</li>
+                  <li><strong>💧 Immediate Hyper Triage (&gt;180 or &gt;250 mg/dL):</strong> Aggressive hydration, ketone testing protocols, and exercise safety warnings.</li>
+                </ul>
+                <div class="agent-welcome-disclaimer" id="agentWelcomeDisclaimer">
+                  <div class="disclaimer-header">
+                    <i data-lucide="shield-check"></i>
+                    <strong>Clinical Research Disclaimer</strong>
+                  </div>
+                  <p>This is an investigational decision-support research prototype calibrated on OhioT1DM patient data. Predictions are strictly CGM-based (no insulin or meal data). It does not provide medical advice, diagnosis, or insulin dosing recommendations. Always consult your diabetes care team before altering your care plan.</p>
+                </div>
+                <p><em>Every number I state is strictly grounded in real model tool runs. Ask any question below to get started!</em></p>
+              </div>
+            </div>
+          </div>
+        `;
+        paintIcons();
+        showToast('Conversation reset', 'info');
+      } catch (err) {
+        showToast('Failed to reset session', 'error');
+      } finally {
+        resetBtn.disabled = false;
+      }
+    });
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const query = input.value.trim();
+    if (!query) return;
+
+    if (stickyDisclaimer) {
+      stickyDisclaimer.hidden = false;
+    }
+
+    const userMsgEl = document.createElement('div');
+    userMsgEl.className = 'agent-msg user';
+    userMsgEl.innerHTML = `<div class="msg-body">${esc(query)}</div>`;
+    thread.appendChild(userMsgEl);
+    input.value = '';
+    input.style.height = 'auto';
+    thread.scrollTop = thread.scrollHeight;
+
+    if (typing) {
+      typing.hidden = false;
+      if (typingStatus) typingStatus.textContent = 'Running models & reasoning…';
+    }
+    input.disabled = true;
+    sendBtn.disabled = true;
+    sendBtn.setAttribute('aria-busy', 'true');
+    sendBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
+
+    const startTime = performance.now();
+    try {
+      const data = await api.agentChat(query, currentAgentSessionId);
+
+      const elapsed = performance.now() - startTime;
+      if (elapsed < 900) {
+        await sleep(900 - elapsed);
+      }
+
+      let toolsHtml = '';
+      if (data.tool_calls && data.tool_calls.length > 0) {
+        const chipsHtml = data.tool_calls.map((tc) => `
+          <div class="tool-chip">
+            <div class="tool-chip-header">
+              <span class="tool-name">${esc(tc.name)}</span>
+            </div>
+            <pre class="tool-json">${esc(JSON.stringify(tc.result, null, 2))}</pre>
+          </div>
+        `).join('');
+
+        toolsHtml = `
+          <div class="msg-tools-wrap">
+            <details class="tools-details" open>
+              <summary><i data-lucide="wrench"></i> Tools Used (${data.tool_calls.length})</summary>
+              <div class="tools-body">${chipsHtml}</div>
+            </details>
+          </div>
+        `;
+      }
+
+      const assistantMsgEl = document.createElement('div');
+      assistantMsgEl.className = 'agent-msg assistant';
+      assistantMsgEl.innerHTML = `
+        <div class="msg-avatar"><i data-lucide="bot"></i></div>
+        <div class="msg-content">
+          ${toolsHtml}
+          <div class="msg-body">${renderMarkdown(data.answer)}</div>
+        </div>
+      `;
+      thread.appendChild(assistantMsgEl);
+      paintIcons();
+      thread.scrollTop = thread.scrollHeight;
+    } catch (error) {
+      let errorNotice = esc(error.message || 'Unknown network error');
+      if (error.status === 429) {
+        errorNotice = 'Groq rate limit reached (429). Please wait a few seconds before asking another question.';
+      } else if (error.status === 503) {
+        errorNotice = 'Groq API key is not configured. Please set GROQ_API_KEY on the backend server.';
+      }
+
+      const errorMsgEl = document.createElement('div');
+      errorMsgEl.className = 'agent-msg assistant error';
+      errorMsgEl.innerHTML = `
+        <div class="msg-avatar" style="border-color: rgba(248, 113, 113, 0.4); color: var(--bad);"><i data-lucide="alert-octagon"></i></div>
+        <div class="msg-content">
+          <div class="msg-body" style="border-color: rgba(248, 113, 113, 0.4); background: rgba(50, 20, 24, 0.8);">
+            <p><strong style="color: var(--bad);">Could not complete request:</strong> ${errorNotice}</p>
+          </div>
+        </div>
+      `;
+      thread.appendChild(errorMsgEl);
+      paintIcons();
+      thread.scrollTop = thread.scrollHeight;
+    } finally {
+      if (typing) typing.hidden = true;
+      input.disabled = false;
+      input.focus();
+      sendBtn.disabled = false;
+      sendBtn.removeAttribute('aria-busy');
+      sendBtn.innerHTML = '<i data-lucide="send" aria-hidden="true"></i><span>Send</span>';
+      paintIcons();
+      thread.scrollTop = thread.scrollHeight;
+    }
+  });
+}
+
 async function init() {
   initCursorDots();
   configureChartDefaults();
@@ -1943,6 +2686,8 @@ async function init() {
   bindSelects();
   bindNavigation();
   bindChrome();
+  bindWellness();
+  bindAgentChat();
   renderStatus();
   showView('overview');
   paintIcons();

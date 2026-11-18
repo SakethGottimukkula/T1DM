@@ -55,6 +55,9 @@
       <button type="button" data-view="upload">
         <i data-lucide="upload" aria-hidden="true"></i>Upload CGM Data
       </button>
+      <button type="button" data-view="agent">
+        <i data-lucide="bot" aria-hidden="true"></i>Forecast Agent
+      </button>
     </nav>
 
     <div class="picker">
@@ -359,6 +362,110 @@
           <p>CGM-only forecasts use the existing OhioT1DM XGBoost models. Multimodal forecasts use separate models trained on SimGlucose virtual-patient data with CGM, past insulin, and optional carbohydrate features.</p>
           <div class="table-wrap"><table id="uploadModels"></table></div>
           <p class="footnote">Research prototype using simulated data; not a treatment recommendation. Only CGM, past insulin, and meal carbohydrate values are model inputs. Simulator risk metrics are excluded.</p>
+        </div>
+      </section>
+
+      <!-- 8. Groq Forecast Agent -->
+      <section id="v-agent" class="view" aria-labelledby="agent-title" hidden>
+        <header class="view-header">
+          <h1 id="agent-title">T1D Forecasting &amp; Wellness Agent</h1>
+          <p>
+            Full-space autonomous assistant powered by Groq and <code>openai/gpt-oss-120b</code>. It answers questions about your glucose forecast by executing calibrated XGBoost models, and generates comprehensive plans for balanced meals, workout routines, and immediate step-by-step triage for hypo- and hyperglycemia.
+          </p>
+        </header>
+
+        <div class="agent-layout">
+          <!-- Chat Card (Full Width) -->
+          <div class="card agent-chat-card">
+            <div class="agent-chat-header">
+              <div class="agent-header-left">
+                <div class="agent-status-badge">
+                  <span class="dot ok" id="agentOnlineDot"></span>
+                  <span id="agentHeaderModel">openai/gpt-oss-120b</span>
+                </div>
+                <span class="agent-header-tagline">Forecasts · Meal Pacing · Workout Routines · Hypo/Hyper Triage</span>
+              </div>
+              <div class="agent-header-right">
+                <span class="agent-header-safety"><i data-lucide="shield-check"></i> Strictly Grounded · No Dosing Advice</span>
+                <button type="button" class="btn icon-btn" id="agentResetBtn" title="Reset conversation" aria-label="Reset conversation">
+                  <i data-lucide="rotate-ccw"></i>
+                </button>
+              </div>
+            </div>
+
+            <!-- Pinned Sticky Disclaimer (appears during active conversation) -->
+            <div id="agentStickyDisclaimer" class="agent-sticky-disclaimer" hidden>
+              <div class="sticky-disclaimer-content">
+                <i data-lucide="shield-alert" class="sticky-disclaimer-icon"></i>
+                <span><strong>Research Prototype:</strong> Predictions are based strictly on CGM history (no insulin or meal data). Not medical or dosing advice. Follow your diabetes care plan and consult your clinician.</span>
+              </div>
+            </div>
+
+            <!-- Messages Thread -->
+            <div class="agent-thread" id="agentThread" role="log" aria-live="polite">
+              <div class="agent-msg assistant">
+                <div class="msg-avatar"><i data-lucide="bot"></i></div>
+                <div class="msg-content">
+                  <div class="msg-body">
+                    <p>Hello! I am your <strong>T1D Forecasting &amp; Wellness Assistant</strong>, powered by Groq (<code>openai/gpt-oss-120b</code>) and your calibrated OhioT1DM XGBoost models.</p>
+                    <p>I can analyze your blood glucose trajectory across 30, 60, 90, and 120-minute horizons, and provide rich, in-depth guidance on:</p>
+                    <ul>
+                      <li><strong>🥗 Meal Data &amp; Nutrition Strategy:</strong> Low-GI carbohydrate pacing, protein/fiber pairing, and practical meal plans to keep glucose in range.</li>
+                      <li><strong>🏃 Workout &amp; Physical Activity Routines:</strong> Safe aerobic and resistance routines, pre-workout checks, and exercise pacing for steady glucose.</li>
+                      <li><strong>⚡ Immediate Hypo Triage (&lt;70 or &lt;54 mg/dL):</strong> Step-by-step <em>Rule of 15</em> fast-acting carb recovery and critical severe hypo protocols.</li>
+                      <li><strong>💧 Immediate Hyper Triage (&gt;180 or &gt;250 mg/dL):</strong> Aggressive hydration, ketone testing protocols, and exercise safety warnings.</li>
+                    </ul>
+                    <div class="agent-welcome-disclaimer" id="agentWelcomeDisclaimer">
+                      <div class="disclaimer-header">
+                        <i data-lucide="shield-check"></i>
+                        <strong>Clinical Research Disclaimer</strong>
+                      </div>
+                      <p>This is an investigational decision-support research prototype calibrated on OhioT1DM patient data. Predictions are strictly CGM-based (no insulin or meal data). It does not provide medical advice, diagnosis, or insulin dosing recommendations. Always consult your diabetes care team before altering your care plan.</p>
+                    </div>
+                    <p><em>Every number I state is strictly grounded in real model tool runs. Ask any question below to get started!</em></p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Typing indicator -->
+            <div class="agent-typing" id="agentTyping" hidden>
+              <div class="msg-avatar"><i data-lucide="bot"></i></div>
+              <div class="typing-bubble">
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-label" id="agentTypingStatus">Reasoning with models…</span>
+              </div>
+            </div>
+
+            <!-- Suggested Prompts -->
+            <div class="agent-suggestions" id="agentSuggestions">
+              <span class="muted" style="font-size: 11px; align-self: center;">Suggested questions:</span>
+              <button type="button" class="btn chip-btn" data-agent-prompt="What will my glucose be in 1 hour & suggest balanced meal ideas?">What will my glucose be in 1 hr & meal ideas?</button>
+              <button type="button" class="btn chip-btn" data-agent-prompt="I feel a low coming on (hypo). What should I do immediately to make it better?">Hypo alert: what to do immediately?</button>
+              <button type="button" class="btn chip-btn" data-agent-prompt="My glucose is high (hyper). What immediate steps should I take right now?">Hyper alert: immediate action steps</button>
+              <button type="button" class="btn chip-btn" data-agent-prompt="Suggest a safe workout routine based on my current glucose trajectory">Safe workout routine for my trend</button>
+              <button type="button" class="btn chip-btn" data-agent-prompt="Why this prediction? Explain the key factors and trends">Why this prediction & key factors?</button>
+            </div>
+
+            <!-- Input Bar -->
+            <form id="agentChatForm" class="agent-chat-form">
+              <div class="agent-input-wrap">
+                <textarea
+                  id="agentInput"
+                  class="agent-input"
+                  rows="1"
+                  placeholder="Ask about your glucose forecast, meal ideas, workout routines, or immediate hypo/hyper triage..."
+                  autocomplete="off"
+                  required
+                ></textarea>
+                <button type="submit" class="btn primary agent-send-btn" id="agentSendBtn" aria-label="Send query">
+                  <i data-lucide="send" aria-hidden="true"></i><span>Send</span>
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       </section>
     </main>

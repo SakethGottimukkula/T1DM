@@ -46,3 +46,11 @@ MIN_HISTORY: int = 24
 # Glucose validation bounds (mg/dL)
 GLUCOSE_MIN: float = 40.0
 GLUCOSE_MAX: float = 400.0
+
+# ---------------------------------------------------------------------------
+# Groq wellness agent
+# ---------------------------------------------------------------------------
+
+GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")

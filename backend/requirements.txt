@@ -8,7 +8,6 @@ python-multipart==0.0.32
 
 # ML / Data
 xgboost==3.4.1
-simglucose==0.2.1
 pandas==3.0.1
 numpy==2.4.3
 scikit-learn==1.8.0
@@ -20,3 +19,7 @@ pydantic==2.13.5
 # Testing
 pytest==9.1.1
 httpx==0.28.1
+
+# LLM Agent
+groq>=0.11.0
+python-dotenv>=1.0.0

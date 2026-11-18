@@ -5,20 +5,35 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
+import httpx
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from .config import CORS_ORIGINS, GLUCOSE_MAX, GLUCOSE_MIN, HORIZONS, MIN_HISTORY, OHIO_TEST_CSV
+from .config import (
+    CORS_ORIGINS,
+    GLUCOSE_MAX,
+    GLUCOSE_MIN,
+    GROQ_API_KEY,
+    GROQ_BASE_URL,
+    GROQ_MODEL,
+    HORIZONS,
+    MIN_HISTORY,
+    OHIO_TEST_CSV,
+)
 from .ega import classify_array
 from .features import FEATURE_COLUMNS, build_features, build_features_single
 from .predictor import ModelStore
+from .wellness import get_wellness_suggestion
+from agent.router import router as agent_router
 from .simglucose_features import SIM_FEATURE_COLUMNS, build_sim_features
 from .schemas import (
     BacktestResponse,
@@ -28,6 +43,8 @@ from .schemas import (
     ModelsResponse,
     PredictRequest,
     PredictResponse,
+    WellnessRequest,
+    WellnessResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +128,9 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+app.include_router(agent_router)
 
 
 def _zone_label(glucose: float) -> str:
@@ -710,3 +730,14 @@ def backtest_patient_metrics(patient_id: str) -> dict:
         }
 
     return {"patient_id": patient_id, "metrics": metrics, "clarke": clarke}
+
+
+# ---------------------------------------------------------------------------
+# Wellness agent (Groq)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/v1/wellness", response_model=WellnessResponse)
+async def wellness(req: WellnessRequest) -> WellnessResponse:
+    """Return a Groq-powered wellness suggestion (meal ideas, workout plans, etc.)."""
+    return await get_wellness_suggestion(req.message)

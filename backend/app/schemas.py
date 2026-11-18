@@ -138,3 +138,27 @@ class HealthResponse(BaseModel):
     models_loaded: int
     models_expected: int
     detail: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Wellness agent
+# ---------------------------------------------------------------------------
+
+
+class WellnessRequest(BaseModel):
+    """POST /v1/wellness request body."""
+
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="User's wellness question (meal ideas, workout plans, etc.)",
+    )
+
+
+class WellnessResponse(BaseModel):
+    """POST /v1/wellness response body."""
+
+    response: str
+    model: str
+    disclaimer: str

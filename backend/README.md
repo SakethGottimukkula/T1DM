@@ -18,11 +18,22 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 Interactive API documentation: `http://127.0.0.1:8000/docs`.
 
-Docker Compose is also available:
+### Agent Configuration (Groq & openai/gpt-oss-120b)
 
-```powershell
-docker compose up --build
+The backend features an autonomous forecasting and wellness agent located in `backend/agent/`. Set these in your `.env` file or environment:
+
+```ini
+GROQ_API_KEY=gsk_your_groq_api_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_REASONING_EFFORT=medium
+MAX_COMPLETION_TOKENS=4096
 ```
+
+- `GROQ_MODEL`: default `openai/gpt-oss-120b`.
+- `GROQ_REASONING_EFFORT`: `low` (direct lookups), `medium` (default), or `high` (explanatory, risk, and lifestyle questions).
+- `MAX_COMPLETION_TOKENS`: default `4096` to provide ample room for comprehensive structured meal and exercise plans.
+- The agent loop suppresses internal model reasoning from logs and responses, strictly executes real XGBoost tools for all numerical values, and enforces sentence-level clinical safety guardrails (stripping actionable dosing directives while preserving safe educational and lifestyle advice).
+- The `/agent/chat` endpoint accepts an optional `forecast_context` payload from the dashboard containing real pipeline predictions (current glucose, rate of change, 30/60/90/120 min forecasts, actuals, and patient-specific RMSE). When no forecast has been run, the agent explicitly informs the user that no active forecast is available, completely preventing hallucinations. Full documentation is in [AGENT_README.md](../AGENT_README.md).
 
 ## Model training
 
@@ -76,6 +87,11 @@ python scripts/train_simglucose_models.py --reuse-existing
 | `POST` | `/v1/predict` | Ohio prediction from JSON CGM readings |
 | `POST` | `/v1/predict/csv` | Ohio prediction from a CGM CSV |
 | `POST` | `/v1/predict/simglucose/csv` | SimGlucose prediction from a multimodal CSV |
+| `POST` | `/v1/wellness` | Groq-powered general wellness suggestion agent (meal/workout ideas) |
+| `GET` | `/agent/health` | Check Groq forecast agent health, model ID, and configuration |
+| `POST` | `/agent/chat` | Groq-powered T1D forecast agent with autonomous tool execution |
+| `POST` | `/agent/reset` | Reset conversational session memory for a given session ID |
+| `GET/POST` | `/agent/chat/stream` | SSE streaming of tool events and synthesized answer tokens |
 | `POST` | `/v1/backtest` | Ohio backtest using an uploaded CSV and chosen horizon |
 | `GET` | `/v1/backtest/overall` | Overall Ohio held-out metrics at all horizons |
 | `GET` | `/v1/backtest/patient/{patient_id}` | Ohio held-out metrics for one patient at all horizons |
@@ -106,6 +122,62 @@ GET /v1/backtest/patient/559
 | `OHIO_TEST_CSV` | `ohio_testing_combined.csv` at repository root | Ohio held-out CSV used by the overall and patient-level metric endpoints |
 | `CORS_ORIGINS` | `http://127.0.0.1:5500,http://localhost:5500` | Comma-separated allowed frontend origins |
 | `TRAIN_CSV` | unset | Optional Ohio training CSV path used by `scripts/train_models.py` when `--train` is not supplied |
+| `GROQ_API_KEY` | unset | Groq Cloud API key for the forecasting agent and wellness assistant |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq chat completion model ID (e.g. `openai/gpt-oss-120b`, `llama-3.3-70b-versatile`) |
+| `GROQ_REASONING_EFFORT` | `medium` | Groq reasoning effort: `low`, `medium`, or `high` |
+| `MAX_COMPLETION_TOKENS` | `4096` | Maximum completion token budget for detailed responses |
+
+## Wellness Suggestion Agent (Groq)
+
+The wellness suggestion agent provides general meal ideas, meal plans, and physical activity or workout routines for individuals managing Type 1 Diabetes.
+
+> **Disclaimer:** Suggestions are general wellness ideas only and do not constitute individualized medical care, diagnosis, prescription, or insulin dosing recommendations. Every response prepends a mandatory clinical disclaimer.
+
+### Key Configuration and Security
+
+In compliance with Groq's security recommendations:
+- **Never commit your API key to source control.** Local secret files (`.env`, `*.env`) are gitignored.
+- Set `GROQ_API_KEY` in your environment or in a local `.env` file at the repository root.
+- The backend communicates directly with Groq via the official SDK; the frontend never receives or handles the API key.
+
+#### Setting Environment Variables
+
+On Windows (PowerShell):
+```powershell
+$env:GROQ_API_KEY = "gsk_your_actual_key_here"
+$env:GROQ_MODEL = "openai/gpt-oss-120b"  # Optional, defaults to openai/gpt-oss-120b
+$env:GROQ_REASONING_EFFORT = "medium"
+```
+
+On Linux/macOS:
+```bash
+export GROQ_API_KEY="gsk_your_actual_key_here"
+export GROQ_MODEL="openai/gpt-oss-120b"
+export GROQ_REASONING_EFFORT="medium"
+```
+
+Or create a `.env` file in the project root:
+```ini
+GROQ_API_KEY=gsk_your_actual_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_REASONING_EFFORT=medium
+MAX_COMPLETION_TOKENS=4096
+```
+
+### Trying the Feature
+
+#### Via CLI:
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/v1/wellness `
+  -H "Content-Type: application/json" `
+  -d '{"message": "Suggest 3 balanced low-glycemic lunch ideas."}'
+```
+
+#### Via Frontend:
+1. Open the dashboard in your browser (e.g., via VS Code Live Server at `http://127.0.0.1:5500/Frontend/index.html`).
+2. Click **Wellness Agent** in the sidebar navigation.
+3. Type a meal or exercise inquiry (or click one of the quick suggestions) and click **Get Suggestions**.
+4. If `GROQ_API_KEY` is not set, the UI clearly displays a configuration notice with instructions.
 
 The Ohio feature pipeline uses 18 CGM-derived columns: `lag_1`, `lag_2`, `lag_3`, `lag_6`, `lag_12`; rolling mean and standard deviation for 30, 60, 90, and 120 minutes; `delta_5`, `delta_30`; and `hour`, `hour_sin`, `hour_cos`. SimGlucose has a separate feature specification stored at `models/simglucose/feature_columns.json`.
 
