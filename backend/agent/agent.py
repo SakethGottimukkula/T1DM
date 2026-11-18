@@ -97,18 +97,31 @@ class T1DMAgent:
         fc = getattr(active_context, "forecast_context", None)
         if fc:
             pt_id = fc.get("patient_id", active_context.patient_id)
+            selected_pt_id = fc.get("selected_patient_id", pt_id)
             has_fc = fc.get("has_forecast", True)
             if not has_fc:
                 ctx_note = (
-                    f"[ACTIVE DASHBOARD CONTEXT: Patient {pt_id}. Note: No forecast has been run yet "
+                    f"[ACTIVE DASHBOARD CONTEXT: Selected patient {selected_pt_id}. Note: No forecast has been run yet "
                     f"for this patient/case. When answering forecast questions, verify tool data and inform the user "
                     f"that no active forecast is currently available. Suggest clicking 'Run Forecast' or uploading CGM data.]"
                 )
             else:
                 src = fc.get("source", "pipeline")
                 ctx_note = (
-                    f"[ACTIVE DASHBOARD CONTEXT: Patient {pt_id}, Source: {src}. Actual forecasting results "
-                    f"are loaded in the system. Use tools to retrieve the exact predictions and patient-specific metrics.]"
+                    f"[ACTIVE DASHBOARD CONTEXT: Selected patient {selected_pt_id}; forecast patient/source ID {pt_id}; source: {src}. "
+                    f"{'This is the previously used forecast for this selected patient. ' if fc.get('previous_forecast') else ''}"
+                    f"This context is authoritative for the current turn and replaces any older patient's context in the chat history. "
+                    f"Use tools to retrieve exact predictions and metrics from the active forecast.]"
+                )
+            upload_quality = fc.get("upload_quality")
+            if upload_quality:
+                ctx_note += (
+                    " [CSV REVIEW DATA: "
+                    f"filename={upload_quality.get('filename')}; model={upload_quality.get('model')}; "
+                    f"headers={upload_quality.get('headers')}; rows={upload_quality.get('row_count')}; "
+                    f"validation_warnings={upload_quality.get('warnings')}; "
+                    f"meal_defaulted_to_zero={upload_quality.get('meal_defaulted_to_zero')}. "
+                    "When asked to improve the upload, base suggestions on these observed details, distinguish confirmed issues from general recommendations, and do not claim to have inspected data beyond the supplied summary. ]"
                 )
             messages.append({"role": "system", "content": ctx_note})
 

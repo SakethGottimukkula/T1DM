@@ -61,12 +61,6 @@
     </nav>
 
     <div class="picker">
-      <label>Patient
-        <select id="sidebarPatient" aria-label="Select Ohio or SimGlucose patient"></select>
-      </label>
-      <label>Test case
-        <select class="sel-case" aria-label="Select test case"></select>
-      </label>
       <span class="demo-badge" id="demoBadge" hidden>Demo data</span>
       <div class="api-status" id="apiStatus" role="status" aria-live="polite"></div>
     </div>
@@ -78,10 +72,7 @@
       <section id="v-overview" class="view active" aria-labelledby="overview-title">
         <header class="view-header">
           <h1 id="overview-title">CGM-Only Blood Glucose Forecasting</h1>
-          <p id="overviewDescription">
-            Predicts future glucose from CGM-only history on the OhioT1DM 2020 cohort,
-            evaluating 30 / 60 / 90 / 120 minute forecast horizons.
-          </p>
+          <p id="overviewDescription">Upload a patient’s CGM CSV to populate the glucose history, forecast, and analysis views with that patient’s data.</p>
         </header>
 
         <div class="grid4" id="summary"></div>
@@ -113,10 +104,7 @@
       <section id="v-forecast" class="view" aria-labelledby="forecast-title" hidden>
         <header class="view-header">
           <h1 id="forecast-title">Glucose Forecast</h1>
-          <p id="forecastDescription">
-            History, a now marker, and the future region showing forecast versus actual held-out value,
-            with the 70–180 mg/dL target range shaded.
-          </p>
+          <p id="forecastDescription">Upload a patient’s CGM CSV to view their history and forecast trajectory.</p>
         </header>
 
         <div class="card">
@@ -128,6 +116,11 @@
           <div class="table-wrap">
             <table id="errTable"></table>
           </div>
+        </div>
+        <div class="card upload-backtest-card" id="uploadBacktestCard" hidden>
+          <h2 id="uploadBacktestTitle">Uploaded history: actual vs predicted</h2>
+          <p class="muted">Each point compares the glucose observed at the selected forecast horizon with the prediction made from the earlier reading. The diagonal indicates perfect agreement.</p>
+          <div class="chart tall"><canvas id="cUploadBacktest" aria-label="Uploaded patient actual versus predicted glucose chart"></canvas></div>
         </div>
       </section>
 
@@ -211,24 +204,35 @@
       <section id="v-clinical" class="view" aria-labelledby="clinical-title" hidden>
         <header class="view-header">
           <h1 id="clinical-title">Clinical Analysis</h1>
-          <p id="performanceDescription">
+          <p id="clinicalDescription">
             Clinical-safety evaluation using Clarke Error Grid analysis.
             This research prototype does not provide treatment or insulin recommendations.
           </p>
         </header>
 
-        <div class="card">
-          <h2>Glucose range</h2>
+        <div class="card" id="patientRangeCard">
+          <h2>Patient glucose range</h2>
           <div id="range" class="range-wrap"></div>
           <p id="rangeNote" class="muted"></p>
         </div>
 
+        <div class="card clinical-reference-controls">
+          <label class="clinical-reference-toggle">
+            <input type="checkbox" id="showReferenceEga">
+            <span>Show EGA for a reference patient</span>
+          </label>
+          <label id="referencePatientControl" hidden>Reference patient
+            <select id="referencePatient" aria-label="Choose reference patient for EGA"></select>
+          </label>
+          <p class="muted">Choose an OhioT1DM or SimGlucose test patient to compare reference EGA records.</p>
+        </div>
+
         <div class="two">
-          <div class="card">
+          <div class="card" id="clarkePlotCard" hidden>
             <h2>Clarke Error Grid</h2>
             <div class="chart sq"><canvas id="cClarke" aria-label="Clarke Error Grid scatter chart"></canvas></div>
           </div>
-          <div class="card">
+          <div class="card" id="clarkeZonesCard" hidden>
             <h2>Zone distribution</h2>
             <div id="zones"></div>
             <p id="clarkeNote" class="muted">
@@ -243,26 +247,36 @@
       <section id="v-performance" class="view" aria-labelledby="perf-title" hidden>
         <header class="view-header">
           <h1 id="perf-title">Performance</h1>
-          <p>
-            CGM-only forecasting results on the OhioT1DM 2020 held-out test set.
-            Overall and selected-patient RMSE (mg/dL), scored reading counts, and clinically safe A+B percentages by horizon.
+          <p id="performanceDescription">
+            Select a test patient or upload a patient CSV to view patient-specific forecast metrics.
           </p>
         </header>
 
+        <div class="card clinical-reference-controls">
+          <label class="clinical-reference-toggle">
+            <input type="checkbox" id="showPerformancePatient">
+            <span>Show test patient performance</span>
+          </label>
+          <label id="performancePatientControl" hidden>Performance patient
+            <select id="performancePatient" aria-label="Choose patient for performance metrics"></select>
+          </label>
+          <p class="muted">An uploaded patient’s results are shown automatically. Otherwise, choose a test patient to view patient-specific metrics.</p>
+        </div>
+
         <div class="grid4" id="perfCards"></div>
 
-        <div class="two">
+        <div class="two" id="performanceMetricsLayout" hidden>
           <div class="card">
             <h2>Overall and patient-specific RMSE</h2>
             <div class="table-wrap"><table id="hTable"></table></div>
           </div>
-          <div class="card">
+          <div class="card" id="performanceChartCard" hidden>
             <h2>Patient RMSE by horizon</h2>
             <div class="chart"><canvas id="cErr" aria-label="Patient RMSE by forecast horizon"></canvas></div>
           </div>
         </div>
 
-        <div class="card">
+        <div class="card" id="modelComparisonCard" hidden>
           <h2>Model comparison</h2>
           <div class="table-wrap model-comparison-wrap"><table id="mTable" class="model-comparison-table"></table></div>
         </div>
@@ -343,10 +357,6 @@
             <label>Forecast horizon
               <select id="uploadHorizon" aria-label="Choose forecast horizon">
                 <option value="all">All horizons</option>
-                <option value="30">30 min</option>
-                <option value="60">60 min</option>
-                <option value="90">90 min</option>
-                <option value="120">120 min</option>
               </select>
             </label>
             <button type="button" class="btn primary upload-submit" id="uploadRun">
@@ -357,6 +367,15 @@
 
         <p class="muted" id="uploadHelp">CSV needs timestamp and glucose (mg/dL), with at least 25 sequential readings at roughly 5-minute intervals.</p>
         <div class="grid4" id="uploadResults" aria-live="polite"></div>
+        <div class="card upload-agent-review">
+          <div>
+            <h2>Improve this CSV with the Forecast Agent</h2>
+            <p class="muted">After a successful prediction, ask the agent to review the upload format, timestamp spacing, and model inputs.</p>
+          </div>
+          <button type="button" class="btn" id="askCsvAgent" disabled>
+            <i data-lucide="bot" aria-hidden="true"></i><span>Review upload with agent</span>
+          </button>
+        </div>
         <div class="card">
           <h2>Prediction models</h2>
           <p>CGM-only forecasts use the existing OhioT1DM XGBoost models. Multimodal forecasts use separate models trained on SimGlucose virtual-patient data with CGM, past insulin, and optional carbohydrate features.</p>
@@ -369,9 +388,7 @@
       <section id="v-agent" class="view" aria-labelledby="agent-title" hidden>
         <header class="view-header">
           <h1 id="agent-title">T1D Forecasting &amp; Wellness Agent</h1>
-          <p>
-            Full-space autonomous assistant powered by Groq and <code>openai/gpt-oss-120b</code>. It answers questions about your glucose forecast by executing calibrated XGBoost models, and generates comprehensive plans for balanced meals, workout routines, and immediate step-by-step triage for hypo- and hyperglycemia.
-          </p>
+          <p>Powered by Groq and <code>openai/gpt-oss-120b</code>, the assistant answers questions about your glucose forecast using calibrated XGBoost models. It can also suggest balanced meals, workout routines, and immediate steps for hypo- and hyperglycemia.</p>
         </header>
 
         <div class="agent-layout">

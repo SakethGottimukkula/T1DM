@@ -78,8 +78,12 @@ let clarkeImage = null;
 let statusTimer = 0;
 const patientMetricsCache = new Map();
 const patientClinicalCache = new Map();
+const lastForecastContexts = new Map();
 const patientMetricsLoading = new Set();
 const patientMetricsFailed = new Set();
+const simReferenceCache = new Map();
+const simReferenceLoading = new Set();
+const simReferenceFailed = new Set();
 let simTestPatientIds = [];
 let simDashboardRequestId = 0;
 let overallMetrics = null;
@@ -102,6 +106,7 @@ const state = {
   forecastFor: null,
   // Cached active uploaded CSV prediction response
   lastUploadForecast: null,
+  lastUploadFileName: '',
 };
 
 /* -----------------------------------------------------------------------------
@@ -271,6 +276,10 @@ function riskOf(glucose) {
 }
 
 function forecastRiskOf(forecast) {
+  if (!forecast.clarke_zone) {
+    const risk = riskOf(forecast.predicted);
+    return { ...risk, detail: `${rangeOf(forecast.predicted).label} · EGA unavailable for uploaded forecasts` };
+  }
   if (!['A', 'B'].includes(forecast.clarke_zone)) {
     return {
       label: 'Unreliable forecast',
@@ -422,11 +431,42 @@ function casesFor(patient) {
 }
 
 function horizonsFor(caseId) {
+  if (state.lastUploadForecast?.predictions?.length) return currentSample().preds;
   if (state.dataset === 'sim' && state.simSample) return state.simSample.preds;
   return livePredictions.get(caseId) || getCase(caseId).preds;
 }
 
 function currentSample() {
+  if (state.lastUploadForecast?.readings?.length) {
+    const upload = state.lastUploadForecast;
+    const rows = upload.readings;
+    const last = rows[rows.length - 1];
+    const values = rows.map((row) => Number(row.glucose));
+    const current = Number(upload.latest_glucose ?? last.glucose);
+    const roc = values.length >= 4 ? (values.at(-1) - values.at(-4)) / 15 : 0;
+    const history = rows.map((row) => ({
+      x: (Date.parse(row.timestamp) - Date.parse(last.timestamp)) / 60_000,
+      y: Number(row.glucose),
+    }));
+    const preds = Object.fromEntries(upload.predictions.map((item) => [Number(item.horizon), {
+      predicted: Number(item.predicted_glucose), actual: null, error: null, clarke_zone: null,
+      zone_label: item.zone_label,
+    }]));
+    const series = [...history, ...upload.predictions.map((item) => ({ x: Number(item.horizon), y: Number(item.predicted_glucose) }))];
+    return {
+      id: 'upload-patient', patient: upload.patient_used || 'Uploaded patient',
+      label: state.lastUploadFileName || 'Uploaded CGM history', series,
+      timestamps: [...rows.map((row) => row.timestamp), ...upload.predictions.map(() => last.timestamp)],
+      preds, history,
+      context: {
+        current, roc, mean: values.reduce((sum, value) => sum + value, 0) / values.length,
+        sd: Math.sqrt(values.reduce((sum, value) => sum + (value - values.reduce((total, reading) => total + reading, 0) / values.length) ** 2, 0) / values.length),
+        tir: values.filter((value) => value >= 70 && value <= 180).length * 100 / values.length,
+      },
+      events: [`Uploaded file: ${state.lastUploadFileName || 'CGM CSV'}`, `${rows.length} recent readings supplied to the forecast`],
+      isUpload: true,
+    };
+  }
   if (state.dataset === 'sim' && state.simSample) return state.simSample;
   return getCase(state.caseId);
 }
@@ -434,11 +474,13 @@ function currentSample() {
 // Predictions are only visible after Run Forecast completes for the selected case.
 // Changing patient, case, or horizon clears them again.
 function hasForecast() {
+  if (state.lastUploadForecast?.predictions?.length) return true;
   if (state.dataset === 'sim') return Boolean(state.simSample);
   return state.forecastFor === state.caseId;
 }
 
 function currentForecast(horizon = state.horizon) {
+  if (state.lastUploadForecast?.predictions?.length) return currentSample().preds[horizon] || null;
   if (state.dataset === 'sim' && state.simSample) return state.simSample.preds[horizon] || null;
   return hasForecast() ? horizonsFor(state.caseId)[horizon] : null;
 }
@@ -492,6 +534,11 @@ async function loadPatientMetrics(patient) {
   } finally {
     patientMetricsLoading.delete(id);
     if (String(state.patient) === id) renderAll({ animate: false, draw: false });
+    if ($('#showReferenceEga')?.checked && $('#referencePatient')?.value === `ohio|${id}`) {
+      renderClinical();
+      requestAnimationFrame(resizeActiveCharts);
+    }
+    if ($('#showPerformancePatient')?.checked && $('#performancePatient')?.value === `ohio|${id}`) renderPerformance();
   }
 }
 
@@ -517,36 +564,48 @@ function getActiveForecastContext() {
   if (state.lastUploadForecast && state.lastUploadForecast.predictions && state.lastUploadForecast.predictions.length > 0) {
     const upload = state.lastUploadForecast;
     const predsMap = {};
-    let latestGlucose = null;
-    let timestamp = null;
+    const latestGlucose = upload.latest_glucose ?? null;
+    const timestamp = upload.timestamp || null;
     upload.predictions.forEach((p) => {
       predsMap[p.horizon] = {
         predicted: p.predicted_glucose,
         change: p.change_from_latest,
         zone: p.zone_label === 'low' ? 'hypoglycemia' : (p.zone_label === 'high' ? 'hyperglycemia' : 'in_range'),
       };
-      if (latestGlucose === null && p.latest_glucose != null) latestGlucose = p.latest_glucose;
-      if (timestamp === null && p.timestamp) timestamp = p.timestamp;
     });
 
-    return {
+    const context = {
       has_forecast: true,
       source: 'upload',
-      patient_id: upload.patient_id || 'Uploaded-CSV',
+      patient_id: upload.patient_used || upload.patient_id || 'Uploaded-CSV',
+      selected_patient_id: String(upload.patient_used || upload.patient_id || 'Uploaded patient'),
       test_case_id: 'csv_upload',
       timestamp: timestamp || new Date().toISOString(),
       current_glucose: latestGlucose,
       predictions: predsMap,
       range_classification: latestGlucose != null ? (latestGlucose < 70 ? 'hypoglycemia' : (latestGlucose > 180 ? 'hyperglycemia' : 'in_range')) : null,
       patient_rmse: null,
+      upload_quality: {
+        filename: state.lastUploadFileName || null,
+        model: upload.selected_model || $('#uploadMode')?.value || 'cgm',
+        headers: upload.headers || [],
+        row_count: upload.row_count ?? null,
+        warnings: upload.warnings || {},
+        meal_defaulted_to_zero: Boolean(upload.meal_defaulted_to_zero),
+      },
+      context_readings: upload.readings || [],
     };
+    lastForecastContexts.set(`${state.dataset}|${context.selected_patient_id}`, context);
+    return context;
   }
 
   // 2. Check held-out Ohio test cases or sim
   const sample = currentSample();
   const hasRun = hasForecast();
-  const ptId = String(state.patient || (sample && sample.patient) || '559');
-  const caseId = state.caseId || (sample && sample.id) || null;
+  const ptId = state.dataset === 'sim'
+    ? String(state.simPatient || (sample && sample.patient) || 'unknown')
+    : String(state.patient || (sample && sample.patient) || '559');
+  const caseId = state.dataset === 'sim' ? (sample && sample.id) || null : state.caseId || (sample && sample.id) || null;
 
   // Calculate current glucose & rate of change from sample readings
   const sampleReadings = readingsFor(sample);
@@ -587,6 +646,10 @@ function getActiveForecastContext() {
   }
 
   if (!hasRun) {
+    const previousContext = lastForecastContexts.get(`${state.dataset}|${ptId}`);
+    if (previousContext) {
+      return { ...previousContext, selected_patient_id: ptId, previous_forecast: true };
+    }
     return {
       has_forecast: false,
       source: 'held_out',
@@ -618,7 +681,7 @@ function getActiveForecastContext() {
     }
   });
 
-  return {
+  const context = {
     has_forecast: true,
     source: 'held_out',
     patient_id: ptId,
@@ -630,7 +693,10 @@ function getActiveForecastContext() {
     range_classification: latestGlucose != null ? (latestGlucose < 70 ? 'hypoglycemia' : (latestGlucose > 180 ? 'hyperglycemia' : 'in_range')) : null,
     predictions: predsMap,
     patient_rmse: Object.keys(patientRmseMap).length > 0 ? patientRmseMap : null,
+    context_readings: sampleReadings,
   };
+  lastForecastContexts.set(`${state.dataset}|${ptId}`, context);
+  return context;
 }
 
 /* -----------------------------------------------------------------------------
@@ -711,8 +777,12 @@ const api = {
   async agentChat(message, sessionId = 'default') {
     const forecastContext = getActiveForecastContext();
     const sample = currentSample();
-    const readings = readingsFor(sample);
-    const patientId = forecastContext && forecastContext.patient_id ? String(forecastContext.patient_id) : String(sample.patient);
+    const readings = forecastContext?.context_readings?.length
+      ? forecastContext.context_readings
+      : (forecastContext?.source === 'upload' && state.lastUploadForecast?.readings?.length)
+        ? state.lastUploadForecast.readings
+        : readingsFor(sample);
+    const patientId = forecastContext?.selected_patient_id || forecastContext?.patient_id || String(sample.patient);
     const response = await fetch(`${API_BASE_URL}${ENDPOINTS.agentChat}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -787,6 +857,7 @@ const api = {
 };
 
 function readingsFor(sample) {
+  if (!sample?.series) return [];
   return sample.series
     .filter((point) => point.x <= 0)
     .map((point) => ({
@@ -1056,7 +1127,7 @@ function setTrajectory(id, opts = {}) {
 
   chart.data.datasets[0].data = sample.series.filter((point) => point.x <= 0);
   // Held-out actuals and the forecast stay hidden until Run Forecast has finished.
-  chart.data.datasets[1].data = ready ? sample.series.filter((point) => point.x >= 0) : [];
+  chart.data.datasets[1].data = ready && !sample.isUpload ? sample.series.filter((point) => point.x >= 0) : [];
   chart.data.datasets[2].data = ready
     ? [{ x: 0, y: sample.context.current }].concat(
         HZ.map((horizon) => ({ x: horizon, y: horizons[horizon].predicted }))
@@ -1234,10 +1305,27 @@ function ensureErrorChart() {
   }));
 }
 
+function ensureUploadBacktestChart() {
+  return ensureChart('cUploadBacktest', (canvas) => new Chart(canvas, {
+    type: 'scatter',
+    data: { datasets: [
+      { label: 'Uploaded patient readings', data: [], borderColor: COLORS.accent, backgroundColor: 'rgba(34,211,238,.5)', pointRadius: 3, pointHoverRadius: 5 },
+      { label: 'Perfect agreement', data: [{ x: 40, y: 40 }, { x: 400, y: 400 }], type: 'line', borderColor: 'rgba(143,163,184,.55)', borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5 },
+    ] },
+    options: { responsive: true, maintainAspectRatio: false, aspectRatio: 1,
+      plugins: { legend: { labels: { color: COLORS.mute } }, tooltip: { callbacks: { label: (context) => {
+        const origin = context.raw.timestamp ? ` · forecast origin ${context.raw.timestamp}` : '';
+        return `Actual ${mg(context.parsed.x)} · predicted ${mg(context.parsed.y)} mg/dL${origin}`;
+      } } } },
+      scales: { x: { min: 40, max: 400, ticks: { color: COLORS.mute }, grid: { color: COLORS.grid }, title: { display: true, text: 'Actual glucose (mg/dL)', color: COLORS.mute } },
+        y: { min: 40, max: 400, ticks: { color: COLORS.mute }, grid: { color: COLORS.grid }, title: { display: true, text: 'Predicted glucose (mg/dL)', color: COLORS.mute } } } },
+  }));
+}
+
 function resizeActiveCharts() {
   const map = {
     overview: ['cMain'],
-    forecast: ['cDetail'],
+    forecast: ['cDetail', 'cUploadBacktest'],
     clinical: ['cClarke'],
     performance: ['cErr'],
   };
@@ -1310,8 +1398,8 @@ function renderOverview(opts = {}) {
       suffix: ' mg/dL',
     }),
     stat('Current trend', `${trend.arrow} ${trend.label}`, trend.detail, '', reveal(opts, 1)),
-    stat('Selected patient', state.dataset === 'sim' ? sample.patient : `Patient ${sample.patient}`, state.dataset === 'sim' ? 'SimGlucose held-out virtual patient' : 'OhioT1DM demo case', '', reveal(opts, 2)),
-    stat('Forecast horizon', `${state.horizon} min`, state.dataset === 'sim' ? 'SimGlucose evaluation model' : 'Ohio CGM-only model', '', reveal(opts, 3)),
+    stat(sample.isUpload ? 'Active data' : 'Selected patient', sample.isUpload ? 'Uploaded patient' : (state.dataset === 'sim' ? sample.patient : `Patient ${sample.patient}`), sample.isUpload ? (state.lastUploadFileName || 'Uploaded CGM CSV') : (state.dataset === 'sim' ? 'SimGlucose held-out virtual patient' : 'OhioT1DM demo case'), '', reveal(opts, 2)),
+    stat('Forecast horizon', `${state.horizon} min`, sample.isUpload ? 'Uploaded patient history' : state.dataset === 'sim' ? 'SimGlucose evaluation model' : 'Ohio CGM-only model', '', reveal(opts, 3)),
   ].join('');
 
   $('#fcards').innerHTML = HZ.map((horizon, index) => {
@@ -1326,7 +1414,7 @@ function renderOverview(opts = {}) {
     return stat(
       `${horizon} min forecast`,
       `${mg(item.predicted)} mg/dL`,
-      `Actual ${mg(item.actual)} · error ${mg(item.error)} · ${assessment.label}`,
+      sample.isUpload ? `Patient upload · ${assessment.label}` : `Actual ${mg(item.actual)} · error ${mg(item.error)} · ${assessment.label}`,
       assessment.cls,
       {
         ...reveal(opts, index),
@@ -1342,14 +1430,20 @@ function renderOverview(opts = {}) {
 
   if (ready) {
     const assessment = forecastRiskOf(forecast);
-    const status = errorStatus(forecast.error);
-    const predictionNote = assessment.label === 'Unreliable forecast'
+    const status = sample.isUpload ? { label: 'upload forecast' } : errorStatus(forecast.error);
+    const predictionNote = sample.isUpload
+      ? 'The estimate is based on the uploaded patient’s CGM history.'
+      : assessment.label === 'Unreliable forecast'
       ? `This prediction should be treated as unreliable (${assessment.detail.toLowerCase()}).`
       : `The estimate indicates ${assessment.detail.toLowerCase()}.`;
-    const source = state.dataset === 'sim'
+    const source = sample.isUpload
+      ? `the uploaded patient data in ${esc(state.lastUploadFileName || 'the CSV')}`
+      : state.dataset === 'sim'
       ? `the held-out SimGlucose virtual patient ${esc(sample.patient)}`
       : `an illustrative OhioT1DM demo scenario for patient ${esc(sample.patient)}`;
-    $('#interp').innerHTML = `At ${state.horizon} minutes the model projects <b>${mg(forecast.predicted)} mg/dL</b>. ${predictionNote} The reference glucose was <b>${mg(forecast.actual)} mg/dL</b>, an absolute error of ${mg(forecast.error)} mg/dL (${status.label.toLowerCase()}, Clarke zone ${forecast.clarke_zone}). This readout uses ${source}. It is a research interpretation, not a treatment recommendation.`;
+    $('#interp').innerHTML = sample.isUpload
+      ? `At ${state.horizon} minutes the model projects <b>${mg(forecast.predicted)} mg/dL</b>. ${predictionNote} The upload does not contain future reference readings, so error and Clarke EGA cannot be calculated. This readout uses ${source}.`
+      : `At ${state.horizon} minutes the model projects <b>${mg(forecast.predicted)} mg/dL</b>. ${predictionNote} The reference glucose was <b>${mg(forecast.actual)} mg/dL</b>, an absolute error of ${mg(forecast.error)} mg/dL (${status.label.toLowerCase()}, Clarke zone ${forecast.clarke_zone}). This readout uses ${source}. It is a research interpretation, not a treatment recommendation.`;
   } else {
     $('#interp').innerHTML = `No forecast has been run for patient ${esc(sample.patient)} (${esc(sample.label)}) yet. Pick a horizon in the <button type="button" class="link-btn" data-go="explorer">Test Explorer</button> and press <b>Run Forecast</b> to see the prediction, reference value, and error.`;
   }
@@ -1404,14 +1498,14 @@ function renderRisk(opts = {}) {
   $('#riskTrajectory').innerHTML = HZ.map((horizon) => {
     const item = horizons[horizon];
     const assessment = forecastRiskOf(item);
-    const zoneClass = ['A', 'B'].includes(item.clarke_zone) ? `zone-${rangeOf(item.predicted).zone}` : 'zone-review';
+    const zoneClass = sample.isUpload ? `zone-${rangeOf(item.predicted).zone}` : ['A', 'B'].includes(item.clarke_zone) ? `zone-${rangeOf(item.predicted).zone}` : 'zone-review';
     return `<div class="risk-chip ${zoneClass}"><span class="hz">${horizon} min</span><span class="val ${assessment.cls}">${mg(item.predicted)}</span><span class="zone ${assessment.cls}">${assessment.label}</span></div>`;
   }).join('');
 
-  const unreliable = HZ.map((horizon) => ({ horizon, item: horizons[horizon] }))
+  const unreliable = sample.isUpload ? null : HZ.map((horizon) => ({ horizon, item: horizons[horizon] }))
     .find(({ item }) => !['A', 'B'].includes(item.clarke_zone));
   const excursion = HZ.map((horizon) => ({ horizon, item: horizons[horizon] }))
-    .filter(({ item }) => ['A', 'B'].includes(item.clarke_zone))
+    .filter(({ item }) => sample.isUpload || ['A', 'B'].includes(item.clarke_zone))
     .map(({ horizon, item }) => ({ horizon, value: item.predicted }))
     .find((item) => item.value < 70 || item.value > 180);
   if (excursion) {
@@ -1420,7 +1514,7 @@ function renderRisk(opts = {}) {
       ? ` Another forecast at ${unreliable.horizon} min is unreliable (Clarke zone ${unreliable.item.clarke_zone}).`
       : '';
     banner.classList.add(excursion.value < 70 ? 'danger' : 'warn');
-    banner.innerHTML = `<strong>${message} (zone A/B).</strong> Earliest horizon outside range: ${excursion.horizon} min, predicted ${mg(excursion.value)} mg/dL.${reliabilityNote}`;
+    banner.innerHTML = `<strong>${message}${sample.isUpload ? '.' : ' (zone A/B).'}</strong> Earliest horizon outside range: ${excursion.horizon} min, predicted ${mg(excursion.value)} mg/dL.${reliabilityNote}`;
   } else if (unreliable) {
     banner.classList.add('warn');
     banner.innerHTML = `<strong>Forecast needs review.</strong> The ${unreliable.horizon} min prediction is outside Clarke zones A/B (zone ${unreliable.item.clarke_zone}), so it is too unreliable to label as high or low glucose.`;
@@ -1435,17 +1529,37 @@ function renderForecast(opts = {}) {
   $('#forecastDescription').textContent = state.dataset === 'sim'
     ? 'SimGlucose held-out glucose history, the selected forecast, and future reference values across the selected virtual patient’s test window.'
     : 'History, a now marker, and the future region showing forecast versus actual held-out value, with the 70–180 mg/dL target range shaded.';
-  const header = '<tr><th>Horizon</th><th>Predicted</th><th>Actual</th><th>Absolute error</th><th>Clarke</th><th>Status</th></tr>';
+  const header = sample.isUpload
+    ? '<tr><th>Horizon</th><th>Forward forecast</th><th>Scored pairs</th><th>RMSE</th><th>Clarke A+B</th><th>Status</th></tr>'
+    : '<tr><th>Horizon</th><th>Predicted</th><th>Actual</th><th>Absolute error</th><th>Clarke</th><th>Status</th></tr>';
   if (hasForecast()) {
     const rows = HZ.map((horizon) => {
       const item = horizonsFor(sample.id)[horizon];
+      if (sample.isUpload) {
+        const metric = state.lastUploadForecast.evaluation?.[String(horizon)];
+        return `<tr${horizon === state.horizon ? ' class="is-selected"' : ''}><td>${horizon} min</td><td>${mg(item.predicted)}</td><td>${metric ? `${metric.n_rows} historical pairs` : '—'}</td><td>${metric ? `${metric.rmse.toFixed(2)} mg/dL RMSE` : '—'}</td><td>${metric ? `${(metric.zone_percentages.A + metric.zone_percentages.B).toFixed(2)}% A+B` : '—'}</td><td>${metric ? 'Scored on upload' : 'Insufficient history'}</td></tr>`;
+      }
       const status = errorStatus(item.error);
       const selected = horizon === state.horizon ? ' class="is-selected"' : '';
-      return `<tr${selected}><td>${horizon} min</td><td>${mg(item.predicted)}</td><td>${mg(item.actual)}</td><td class="${status.cls}">${mg(item.error)} mg/dL</td><td>${item.clarke_zone}</td><td class="${status.cls}">${status.label}</td></tr>`;
+      return sample.isUpload
+        ? `<tr${selected}><td>${horizon} min</td><td>${mg(item.predicted)}</td><td colspan="3" class="muted">Future reference unavailable; EGA not calculated</td><td>${forecastRiskOf(item).label}</td></tr>`
+        : `<tr${selected}><td>${horizon} min</td><td>${mg(item.predicted)}</td><td>${mg(item.actual)}</td><td class="${status.cls}">${mg(item.error)} mg/dL</td><td>${item.clarke_zone}</td><td class="${status.cls}">${status.label}</td></tr>`;
     }).join('');
     $('#errTable').innerHTML = header + rows;
   } else {
     $('#errTable').innerHTML = `${header}<tr><td colspan="6" class="muted">No forecast yet. Run one in the <button type="button" class="link-btn" data-go="explorer">Test Explorer</button> to fill this table.</td></tr>`;
+  }
+
+  const backtestCard = $('#uploadBacktestCard');
+  if (backtestCard) {
+    const evaluation = sample.isUpload ? state.lastUploadForecast.evaluation?.[String(state.horizon)] : null;
+    backtestCard.hidden = !sample.isUpload || !evaluation;
+    if (sample.isUpload && state.view === 'forecast' && evaluation) {
+      const chart = ensureUploadBacktestChart();
+      $('#uploadBacktestTitle').textContent = `Uploaded history: actual vs predicted at ${state.horizon} min`;
+      chart.data.datasets[0].data = evaluation.actual.map((actual, index) => ({ x: actual, y: evaluation.predicted[index], timestamp: evaluation.timestamps[index] }));
+      chart.update(reduceMotion ? 'none' : undefined);
+    }
   }
 
   if (state.view === 'forecast') {
@@ -1517,108 +1631,196 @@ function renderClinical() {
   const sample = currentSample();
   const forecast = currentForecast();
   const scale = (glucose) => clamp(((glucose - 40) / 360) * 100, 0, 100);
-  const now = scale(sample.context.current);
-  const predMarker = forecast
-    ? `<span class="mk below" style="left:${scale(forecast.predicted)}%;color:${COLORS.accent}">Pred ${mg(forecast.predicted)}</span>`
-    : '';
-  $('#range').innerHTML = `<div class="rbar" role="img" aria-label="Glucose range from low through in range to high">
+  let rangeNow = null;
+  let rangePred = null;
+  let rangeLabel = '';
+  if (sample.isUpload) {
+    rangeNow = sample.context.current;
+    rangePred = forecast?.predicted ?? null;
+    rangeLabel = 'Uploaded patient';
+  } else if (state.dataset === 'sim' && state.simSample) {
+    rangeNow = state.simSample.context.current;
+    rangePred = state.simSample.preds[state.horizon]?.predicted ?? null;
+    rangeLabel = `SimGlucose patient ${state.simPatient}`;
+  } else if (state.forecastFor === state.caseId) {
+    rangeNow = sample.context.current;
+    rangePred = forecast?.predicted ?? null;
+    rangeLabel = `OhioT1DM patient ${sample.patient}`;
+  }
+  const nowMarker = rangeNow == null ? '' : `<span class="mk" style="left:${scale(rangeNow)}%;color:${COLORS.text}">Now ${mg(rangeNow)}</span>`;
+  const predMarker = rangePred == null ? '' : `<span class="mk below" style="left:${scale(rangePred)}%;color:${COLORS.accent}">Pred ${mg(rangePred)}</span>`;
+  $('#range').innerHTML = `<div class="rbar" role="img" aria-label="${esc(rangeLabel || 'Glucose range; no patient selected')} glucose range and forecast">
       <i style="width:${scale(70)}%;background:${COLORS.bad}"></i>
       <i style="width:${scale(180) - scale(70)}%;background:${COLORS.ok}"></i>
       <i style="flex:1;background:${COLORS.warn}"></i>
-      <span class="mk" style="left:${now}%;color:${COLORS.text}">Now ${mg(sample.context.current)}</span>
+      ${nowMarker}
       ${predMarker}
     </div>`;
-  const simMetric = state.dataset === 'sim' ? sample.metrics?.[String(state.horizon)] : null;
-  const ohioClinical = state.dataset === 'ohio'
-    ? patientClinicalCache.get(String(sample.patient))?.[String(state.horizon)]
-    : null;
-  const shares = simMetric?.zone_percentages || ohioClinical?.percentages;
-  const abPercent = shares ? shares.A + shares.B : null;
-  const sourceLabel = state.dataset === 'sim' ? 'this held-out SimGlucose patient' : `Ohio patient ${sample.patient}`;
-  $('#rangeNote').textContent = abPercent == null
-    ? `Low is under 70 mg/dL, in range is 70–180, and high is above 180. Loading Clarke EGA for ${sourceLabel} at ${state.horizon} min.`
-    : `Low is under 70 mg/dL, in range is 70–180, and high is above 180. For ${state.horizon} min, ${sourceLabel} Clarke A+B is ${abPercent.toFixed(2)}%. This view does not recommend a treatment.`;
-
-  $('#zones').innerHTML = shares
-    ? Object.entries(shares).map(([zone, percent]) =>
-        `<div class="zrow"><b>${zone}</b><div><i style="width:${percent}%;background:${ZONE_COLORS[zone]}"></i></div><span>${percent.toFixed(2)}%</span></div>`
-      ).join('')
-    : '<p class="muted">Patient-specific Clarke zone distribution is loading. If it remains unavailable, check the backend connection.</p>';
-  $('#clarkeNote').textContent = state.dataset === 'sim'
-    ? `Held-out SimGlucose patient ${sample.patient} evaluation points; the selected forecast is outlined in cyan.`
-    : ohioClinical
-      ? `Ohio patient ${sample.patient} held-out test points; the selected forecast is outlined in cyan.`
-      : `Loading held-out test points for Ohio patient ${sample.patient}.`;
-
-  if (state.view !== 'clinical') return;
-  const chart = ensureClarke();
-  if (!chart) return;
-  const horizons = forecast ? horizonsFor(sample.id) : null;
-  const cloud = state.dataset === 'sim' && sample.scatter
-    ? sample.scatter[String(state.horizon)]
-    : ohioClinical?.points || [];
-  chart.data.datasets[0].label = state.dataset === 'sim'
-    ? `SimGlucose patient ${sample.patient} test points`
-    : ohioClinical ? `Ohio patient ${sample.patient} test points` : 'Loading Ohio patient test points';
-  chart.data.datasets[0].data = cloud;
-  chart.data.datasets[0].pointBackgroundColor = cloud.map((point) => ZONE_COLORS[point.z]);
-  chart.data.datasets[1].data = horizons
-    ? HZ.map((horizon) => ({
-        x: horizons[horizon].actual,
-        y: horizons[horizon].predicted,
-        horizon,
-      }))
-    : [];
-  chart.data.datasets[1].pointRadius = (context) => (context.raw && context.raw.horizon === state.horizon ? 9 : 6);
-  chart.update(reduceMotion ? 'none' : undefined);
+  const referenceEnabled = $('#showReferenceEga')?.checked;
+  const referenceValue = $('#referencePatient')?.value || '';
+  const [referenceDataset, referencePatient] = referenceValue.split('|');
+  if (referenceEnabled && referenceDataset && referencePatient) {
+    $('#clarkePlotCard').hidden = false;
+    $('#clarkeZonesCard').hidden = false;
+    const simReference = referenceDataset === 'sim' ? simReferenceCache.get(referencePatient) : null;
+    const reference = referenceDataset === 'sim'
+      ? (simReference ? { percentages: simReference.metrics[String(state.horizon)]?.zone_percentages, points: simReference.scatter[String(state.horizon)] } : null)
+      : patientClinicalCache.get(String(referencePatient))?.[String(state.horizon)];
+    if (referenceDataset === 'sim' && simReference) {
+      rangeNow = simReference.context.current;
+      rangePred = simReference.predictions[String(state.horizon)]?.predicted ?? null;
+      rangeLabel = `SimGlucose patient ${referencePatient}`;
+    } else if (referenceDataset === 'ohio' && reference?.points?.length) {
+      rangeNow = reference.points.at(-1).x;
+      rangePred = reference.points.at(-1).y;
+      rangeLabel = `OhioT1DM patient ${referencePatient}`;
+    }
+    const referenceNow = rangeNow == null ? '' : `<span class="mk" style="left:${scale(rangeNow)}%;color:${COLORS.text}">Now ${mg(rangeNow)}</span>`;
+    const referencePred = rangePred == null ? '' : `<span class="mk below" style="left:${scale(rangePred)}%;color:${COLORS.accent}">Pred ${mg(rangePred)}</span>`;
+    $('#range').innerHTML = `<div class="rbar" role="img" aria-label="${esc(rangeLabel || 'Glucose range')} glucose range and forecast"><i style="width:${scale(70)}%;background:${COLORS.bad}"></i><i style="width:${scale(180) - scale(70)}%;background:${COLORS.ok}"></i><i style="flex:1;background:${COLORS.warn}"></i>${referenceNow}${referencePred}</div>`;
+    $('#zones').innerHTML = reference?.percentages
+      ? Object.entries(reference.percentages).map(([zone, percent]) => `<div class="zrow"><b>${zone}</b><div><i style="width:${percent}%;background:${ZONE_COLORS[zone]}"></i></div><span>${percent.toFixed(2)}%</span></div>`).join('')
+      : (referenceDataset === 'sim' ? simReferenceFailed.has(referencePatient) : patientMetricsFailed.has(String(referencePatient)))
+        ? '<p class="muted">Could not load reference patient EGA. Check the backend connection and select the patient again to retry.</p>'
+        : '<p class="muted">Loading reference patient EGA…</p>';
+    $('#rangeNote').textContent = `${rangeLabel} reference patient range at ${state.horizon} min.`;
+    $('#clarkeNote').textContent = `Held-out ${referenceDataset === 'sim' ? 'SimGlucose' : 'OhioT1DM'} test readings for reference patient ${referencePatient}.`;
+    if (state.view === 'clinical') {
+      const chart = ensureClarke();
+      if (chart) {
+        chart.data.datasets[0].label = `${referenceDataset === 'sim' ? 'SimGlucose' : 'OhioT1DM'} reference patient ${referencePatient}`;
+        chart.data.datasets[0].data = reference?.points || [];
+        chart.data.datasets[0].pointBackgroundColor = (reference?.points || []).map((point) => ZONE_COLORS[point.z]);
+        chart.data.datasets[1].data = [];
+        chart.update(reduceMotion ? 'none' : undefined);
+      }
+    }
+    if (referenceDataset === 'ohio' && !reference && !patientMetricsLoading.has(referencePatient) && !patientMetricsFailed.has(referencePatient)) loadPatientMetrics(referencePatient);
+    if (referenceDataset === 'sim' && !simReference && !simReferenceLoading.has(referencePatient) && !simReferenceFailed.has(referencePatient)) loadSimReference(referencePatient);
+    return;
+  }
+  if (sample.isUpload) {
+    const evaluation = state.lastUploadForecast.evaluation?.[String(state.horizon)];
+    $('#clarkePlotCard').hidden = !evaluation;
+    $('#clarkeZonesCard').hidden = !evaluation;
+    $('#rangeNote').textContent = `Now is the uploaded patient’s final reading (${mg(sample.context.current)} mg/dL); Pred is the ${state.horizon}-minute forecast (${mg(forecast?.predicted ?? sample.context.current)} mg/dL).`;
+    $('#zones').innerHTML = evaluation?.zone_percentages
+      ? Object.entries(evaluation.zone_percentages).map(([zone, percent]) => `<div class="zrow"><b>${zone}</b><div><i style="width:${percent}%;background:${ZONE_COLORS[zone]}"></i></div><span>${percent.toFixed(2)}%</span></div>`).join('')
+      : '<p class="muted">Not enough future readings in this CSV to calculate EGA for the selected horizon.</p>';
+    $('#clarkeNote').textContent = evaluation
+      ? `Uploaded patient history scored at ${state.horizon} minutes; points compare actual future glucose with model predictions.`
+      : 'More historical readings are needed to score this horizon.';
+    if (state.view === 'clinical' && evaluation) {
+      const chart = ensureClarke();
+      if (chart) {
+        chart.data.datasets[0].data = evaluation?.points || [];
+        chart.data.datasets[0].pointBackgroundColor = (evaluation?.points || []).map((point) => ZONE_COLORS[point.z]);
+        chart.data.datasets[1].data = [];
+        chart.data.datasets[0].label = `Uploaded patient · ${state.horizon} min historical EGA`;
+        chart.update(reduceMotion ? 'none' : undefined);
+      }
+    }
+    return;
+  }
+  $('#clarkePlotCard').hidden = true;
+  $('#clarkeZonesCard').hidden = true;
+  $('#rangeNote').textContent = rangeLabel ? `${rangeLabel}: current glucose ${mg(rangeNow)} mg/dL${rangePred == null ? '' : ` · forecast ${state.horizon} min ahead: ${mg(rangePred)} mg/dL`}.` : 'The range bar is ready for an uploaded or selected patient.';
+  $('#zones').innerHTML = '';
+  $('#clarkeNote').textContent = '';
+  if (state.view === 'clinical') {
+    const chart = ensureClarke();
+    if (chart) {
+      chart.data.datasets[0].data = [];
+      chart.data.datasets[1].data = [];
+      chart.data.datasets[0].label = 'No EGA data selected';
+      chart.update(reduceMotion ? 'none' : undefined);
+    }
+  }
+  return;
 }
 
 function renderPerformance() {
-  $('#performanceDescription').textContent = state.dataset === 'sim'
-    ? 'Patient-specific held-out SimGlucose results: RMSE, MAE, and Clarke A+B across all four forecast horizons.'
-    : 'CGM-only forecasting results on the OhioT1DM 2020 held-out test set. Overall and selected-patient RMSE (mg/dL), scored reading counts, and clinically safe A+B percentages by horizon.';
-  if (state.dataset === 'sim' && state.simSample?.metrics) {
-    const patient = state.simSample.patient;
-    const metrics = state.simSample.metrics;
+  if (state.lastUploadForecast?.predictions?.length) {
+    $('#performanceMetricsLayout').hidden = false;
+    $('#performanceChartCard').hidden = false;
+    $('#modelComparisonCard').hidden = false;
+    const upload = currentSample();
+    const evaluation = state.lastUploadForecast.evaluation || {};
+    $('#performanceDescription').textContent = 'Historical forecast accuracy measured on the uploaded patient’s own records, plus forward predictions from their latest readings.';
     $('#perfCards').innerHTML = HZ.map((horizon) => {
-      const metric = metrics[String(horizon)];
-      return stat(`${horizon} min · SimGlucose RMSE`, `${metric.rmse.toFixed(2)} mg/dL`, `Patient ${esc(patient)} · MAE ${metric.mae.toFixed(2)} mg/dL · A+B ${(metric.zone_percentages.A + metric.zone_percentages.B).toFixed(2)}%`);
+      const metric = evaluation[String(horizon)];
+      return stat(`${horizon} min · Uploaded RMSE`, metric ? `${metric.rmse.toFixed(2)} mg/dL` : 'Unavailable', metric ? `MAE ${metric.mae.toFixed(2)} mg/dL · ${metric.n_rows} scored readings · A+B ${(metric.zone_percentages.A + metric.zone_percentages.B).toFixed(2)}%` : `Forward forecast ${mg(upload.preds[horizon].predicted)} mg/dL · insufficient future labels`);
     }).join('');
-    $('#hTable').innerHTML = `<tr><th>Horizon</th><th>Patient RMSE</th><th>Patient MAE</th><th>Clarke A+B</th></tr>${HZ.map((horizon) => {
-      const metric = metrics[String(horizon)];
-      return `<tr class="${horizon === state.horizon ? 'is-selected' : ''}"><td>${horizon} min</td><td>${metric.rmse.toFixed(2)} mg/dL</td><td>${metric.mae.toFixed(2)} mg/dL</td><td>${(metric.zone_percentages.A + metric.zone_percentages.B).toFixed(2)}%</td></tr>`;
+    $('#hTable').innerHTML = `<tr><th>Horizon</th><th>Forward forecast</th><th>Historical RMSE</th><th>MAE</th><th>Clarke A+B</th></tr>${HZ.map((horizon) => {
+      const metric = evaluation[String(horizon)];
+      return `<tr class="${horizon === state.horizon ? 'is-selected' : ''}"><td>${horizon} min</td><td>${mg(upload.preds[horizon].predicted)} mg/dL</td><td>${metric ? `${metric.rmse.toFixed(2)} mg/dL` : '—'}</td><td>${metric ? `${metric.mae.toFixed(2)} mg/dL` : '—'}</td><td>${metric ? `${(metric.zone_percentages.A + metric.zone_percentages.B).toFixed(2)}%` : '—'}</td></tr>`;
     }).join('')}`;
-    $('#mTable').innerHTML = `<tr><th>Metric · SimGlucose patient ${esc(patient)}</th>${HZ.map((horizon) => `<th>${horizon} min</th>`).join('')}</tr>
-      <tr><td>RMSE (mg/dL)</td>${HZ.map((horizon) => `<td>${metrics[String(horizon)].rmse.toFixed(2)}</td>`).join('')}</tr>
-      <tr><td>MAE (mg/dL)</td>${HZ.map((horizon) => `<td>${metrics[String(horizon)].mae.toFixed(2)}</td>`).join('')}</tr>
-      <tr><td>Clarke A+B</td>${HZ.map((horizon) => `<td>${(metrics[String(horizon)].zone_percentages.A + metrics[String(horizon)].zone_percentages.B).toFixed(2)}%</td>`).join('')}</tr>`;
+    $('#mTable').innerHTML = `<tr><th>Upload context</th><th>Value</th></tr><tr><td>File</td><td>${esc(state.lastUploadFileName || 'Uploaded CSV')}</td></tr><tr><td>Readings used</td><td>${upload.history.length}</td></tr><tr><td>Model</td><td>${upload.isUpload ? esc(state.lastUploadForecast.selected_model || 'CGM') : 'CGM'}</td></tr>`;
     if (state.view === 'performance') {
       const chart = ensureErrorChart();
-      chart.data.datasets[0].label = `SimGlucose patient ${patient} RMSE (mg/dL)`;
-      chart.data.datasets[0].data = HZ.map((horizon) => metrics[String(horizon)].rmse);
+      chart.data.datasets[0].label = 'Uploaded patient RMSE (mg/dL)';
+      chart.data.datasets[0].data = HZ.map((horizon) => evaluation[String(horizon)]?.rmse ?? null);
       chart.update(reduceMotion ? 'none' : undefined);
     }
     return;
   }
-  $('#perfCards').innerHTML = HZ.map((horizon) =>
-    stat(`${horizon} min · Overall RMSE`, overallRmseText(horizon), `Patient ${state.patient}: ${patientRmseText(state.patient, horizon)} · A+B overall ${SAFE[horizon].toFixed(2)}%`)
-  ).join('');
-
-  $('#hTable').innerHTML = `<tr><th>Horizon</th><th>Overall RMSE</th><th>Patient ${esc(state.patient)} RMSE</th><th>Clinically safe A+B (overall)</th></tr>${
-    HZ.map((horizon) => `<tr class="${horizon === state.horizon ? 'is-selected' : ''}"><td>${horizon} min</td><td>${overallRmseText(horizon)}</td><td>${patientRmseText(state.patient, horizon)}</td><td>${SAFE[horizon].toFixed(2)}%</td></tr>`).join('')
-  }`;
-
-  $('#mTable').innerHTML = `<tr><th>Metric</th><th>30 min</th><th>60 min</th><th>90 min</th><th>120 min</th></tr>
-    <tr><td>Overall RMSE · Ohio test</td>${HZ.map((horizon) => `<td>${overallRmseText(horizon)}</td>`).join('')}</tr>
-    <tr><td>Overall MAE · Ohio test</td>${HZ.map((horizon) => `<td>${overallMaeText(horizon)}</td>`).join('')}</tr>
-    <tr><td>Patient ${esc(state.patient)} RMSE</td>${HZ.map((horizon) => `<td>${patientRmseText(state.patient, horizon)}</td>`).join('')}</tr>
-    <tr><td>Patient ${esc(state.patient)} MAE</td>${HZ.map((horizon) => `<td>${patientMaeText(state.patient, horizon)}</td>`).join('')}</tr>
-    <tr><td>Clinically safe A+B · overall</td>${HZ.map((horizon) => `<td>${SAFE[horizon].toFixed(2)}%</td>`).join('')}</tr>`;
-
+  const selected = $('#showPerformancePatient')?.checked ? ($('#performancePatient')?.value || '') : '';
+  if (!selected) {
+    $('#performanceMetricsLayout').hidden = true;
+    $('#performanceChartCard').hidden = true;
+    $('#modelComparisonCard').hidden = true;
+    $('#performanceDescription').textContent = 'Upload a patient CSV or select a test patient to view patient-specific forecast performance.';
+    $('#perfCards').innerHTML = '';
+    $('#hTable').innerHTML = '';
+    $('#mTable').innerHTML = '';
+    if (charts.cErr) {
+      charts.cErr.data.datasets[0].data = [];
+      charts.cErr.update(reduceMotion ? 'none' : undefined);
+    }
+    return;
+  }
+  const [dataset, patient] = selected.split('|');
+  const simData = dataset === 'sim' ? simReferenceCache.get(patient) : null;
+  const metrics = dataset === 'sim'
+    ? simData?.metrics
+    : patientMetricsCache.get(patient);
+  if (!metrics) {
+    $('#performanceMetricsLayout').hidden = true;
+    $('#performanceChartCard').hidden = true;
+    $('#modelComparisonCard').hidden = true;
+    $('#performanceDescription').textContent = simReferenceLoading.has(patient) || patientMetricsLoading.has(patient)
+      ? `Loading performance for ${dataset === 'sim' ? 'SimGlucose' : 'OhioT1DM'} patient ${patient}…`
+      : `Performance is unavailable for ${dataset === 'sim' ? 'SimGlucose' : 'OhioT1DM'} patient ${patient}.`;
+    if (dataset === 'sim' && !simReferenceLoading.has(patient) && !simReferenceFailed.has(patient)) loadSimReference(patient);
+    if (dataset === 'ohio' && !patientMetricsLoading.has(patient) && !patientMetricsFailed.has(patient)) loadPatientMetrics(patient);
+    return;
+  }
+  $('#performanceMetricsLayout').hidden = false;
+  $('#performanceChartCard').hidden = false;
+  $('#modelComparisonCard').hidden = false;
+  const clinical = dataset === 'sim' ? null : patientClinicalCache.get(patient);
+  const patientName = `${dataset === 'sim' ? 'SimGlucose' : 'OhioT1DM'} patient ${patient}`;
+  $('#performanceDescription').textContent = `Historical RMSE, MAE, and Clarke zones for ${patientName}.`;
+  $('#perfCards').innerHTML = HZ.map((horizon) => {
+    const metric = metrics[String(horizon)];
+    const zoneShares = metric.zone_percentages || clinical?.[String(horizon)]?.percentages;
+    const ab = zoneShares ? zoneShares.A + zoneShares.B : null;
+    return stat(`${horizon} min · RMSE`, `${metric.rmse.toFixed(2)} mg/dL`, `MAE ${metric.mae.toFixed(2)} mg/dL · ${metric.n_rows} scored readings · A+B ${ab == null ? '—' : `${ab.toFixed(2)}%`}`);
+  }).join('');
+  $('#hTable').innerHTML = `<tr><th>Horizon</th><th>RMSE</th><th>MAE</th><th>Scored readings</th><th>Clarke A+B</th></tr>${HZ.map((horizon) => {
+    const metric = metrics[String(horizon)];
+    const zones = metric.zone_percentages || clinical?.[String(horizon)]?.percentages;
+    const ab = zones ? `${(zones.A + zones.B).toFixed(2)}%` : '—';
+    return `<tr class="${horizon === state.horizon ? 'is-selected' : ''}"><td>${horizon} min</td><td>${metric.rmse.toFixed(2)} mg/dL</td><td>${metric.mae.toFixed(2)} mg/dL</td><td>${metric.n_rows}</td><td>${ab}</td></tr>`;
+  }).join('')}`;
+  $('#mTable').innerHTML = `<tr><th>Metric · ${esc(patientName)}</th>${HZ.map((horizon) => `<th>${horizon} min</th>`).join('')}</tr>
+    <tr><td>RMSE (mg/dL)</td>${HZ.map((horizon) => `<td>${metrics[String(horizon)].rmse.toFixed(2)}</td>`).join('')}</tr>
+    <tr><td>MAE (mg/dL)</td>${HZ.map((horizon) => `<td>${metrics[String(horizon)].mae.toFixed(2)}</td>`).join('')}</tr>
+    <tr><td>Scored readings</td>${HZ.map((horizon) => `<td>${metrics[String(horizon)].n_rows}</td>`).join('')}</tr>`;
   if (state.view === 'performance') {
     const chart = ensureErrorChart();
-    chart.data.datasets[0].label = `Patient ${state.patient} RMSE (mg/dL)`;
-    chart.data.datasets[0].data = HZ.map((horizon) => patientRmse(state.patient, horizon));
+    chart.data.datasets[0].label = `${patientName} RMSE (mg/dL)`;
+    chart.data.datasets[0].data = HZ.map((horizon) => metrics[String(horizon)]?.rmse ?? null);
     chart.update(reduceMotion ? 'none' : undefined);
   }
 }
@@ -1712,6 +1914,7 @@ function applyPrediction(result) {
     state.usingDemo = true;
     showDemoBadge(true);
   }
+  getActiveForecastContext();
   renderStatus();
 }
 
@@ -1832,27 +2035,6 @@ function bindNavigation() {
 }
 
 function bindSelects() {
-  $('#sidebarPatient').addEventListener('change', () => {
-    const [dataset, patient] = $('#sidebarPatient').value.split('|');
-    if (dataset === 'sim') {
-      state.dataset = 'sim';
-      state.simPatient = patient;
-      $('#simTestPatient').value = patient;
-      state.horizon = Number($('#simTestHorizon').value || state.horizon);
-      state.lastUploadForecast = null;
-      return;
-    }
-    if (!casesFor(patient).length) return;
-    state.dataset = 'ohio';
-    state.patient = patient;
-    state.caseId = casesFor(patient)[0].id;
-    state.forecastFor = null;
-    state.lastUploadForecast = null;
-    syncSelects();
-    renderAll({ animate: false, draw: true });
-    loadPatientMetrics(state.patient);
-  });
-
   $all('.sel-patient').forEach((select) => {
     select.addEventListener('change', () => {
       if (state.running) {
@@ -1914,6 +2096,40 @@ function bindChrome() {
     const link = event.target.closest('[data-go]');
     if (link) showView(link.dataset.go);
   });
+  const referenceToggle = $('#showReferenceEga');
+  const referenceControl = $('#referencePatientControl');
+  const referenceSelect = $('#referencePatient');
+  if (referenceToggle && referenceControl && referenceSelect) {
+    populateAnalysisPatientOptions();
+    referenceToggle.addEventListener('change', () => {
+      referenceControl.hidden = !referenceToggle.checked;
+      if (!referenceToggle.checked) referenceSelect.value = '';
+      renderClinical();
+    });
+    referenceSelect.addEventListener('change', () => {
+      const [dataset, patient] = referenceSelect.value.split('|');
+      if (dataset === 'ohio' && patient) loadPatientMetrics(patient);
+      if (dataset === 'sim' && patient) loadSimReference(patient);
+      renderClinical();
+    });
+  }
+  const perfToggle = $('#showPerformancePatient');
+  const perfControl = $('#performancePatientControl');
+  const perfSelect = $('#performancePatient');
+  if (perfToggle && perfControl && perfSelect) {
+    populateAnalysisPatientOptions();
+    perfToggle.addEventListener('change', () => {
+      perfControl.hidden = !perfToggle.checked;
+      if (!perfToggle.checked) perfSelect.value = '';
+      renderPerformance();
+    });
+    perfSelect.addEventListener('change', () => {
+      const [dataset, patient] = perfSelect.value.split('|');
+      if (dataset === 'ohio' && patient) loadPatientMetrics(patient);
+      if (dataset === 'sim' && patient) loadSimReference(patient);
+      renderPerformance();
+    });
+  }
   $('#run').addEventListener('click', runForecast);
   $('#rand').addEventListener('click', chooseRandomCase);
   $('#runSimTest').addEventListener('click', runSimTest);
@@ -1922,15 +2138,26 @@ function bindChrome() {
       state.dataset = 'sim';
       state.horizon = Number($('#simTestHorizon').value);
       state.simPatient = $('#simTestPatient').value;
-      $('#sidebarPatient').value = `sim|${state.simPatient}`;
     });
   });
   $('#uploadMode').addEventListener('change', updateUploadHelp);
   $('#chooseCsv').addEventListener('click', () => $('#uploadCsv').click());
   $('#uploadCsv').addEventListener('change', () => {
     $('#uploadFileName').textContent = $('#uploadCsv').files[0]?.name || 'No file selected';
+    state.lastUploadForecast = null;
+    state.lastUploadFileName = $('#uploadCsv').files[0]?.name || '';
+    $('#askCsvAgent').disabled = true;
+    renderAll({ animate: false, draw: true });
   });
   $('#uploadRun').addEventListener('click', uploadAndPredict);
+  $('#askCsvAgent').addEventListener('click', () => {
+    if (!state.lastUploadForecast) return;
+    showView('agent');
+    const input = $('#agentInput');
+    input.value = `Review my uploaded CSV (${state.lastUploadFileName || 'current upload'}) and suggest concrete improvements to its formatting, timestamps, data quality, and selected model inputs. Use the upload validation and forecast context from this session.`;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    $('#agentChatForm').requestSubmit();
+  });
   renderUploadModels();
 }
 
@@ -1943,8 +2170,8 @@ async function loadSimTestPatients() {
     simTestPatientIds = data.patients || [];
     select.innerHTML = simTestPatientIds.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
     fillSidebarPatients();
+    populateAnalysisPatientOptions();
     select.addEventListener('change', () => {
-      $('#sidebarPatient').value = `sim|${select.value}`;
       state.dataset = 'sim';
       state.simPatient = select.value;
       state.horizon = Number($('#simTestHorizon').value || state.horizon);
@@ -1952,19 +2179,58 @@ async function loadSimTestPatients() {
   } catch (error) {
     simTestPatientIds = [];
     fillSidebarPatients();
+    populateAnalysisPatientOptions();
     select.innerHTML = '<option value="">Unavailable</option>';
     $('#simTestResults').innerHTML = `<div class="stat"><small>SimGlucose evaluation</small><b>Unavailable</b><span>${esc(error.message)}</span></div>`;
+  }
+}
+
+function populateAnalysisPatientOptions() {
+  const markup = [
+    '<option value="">Choose a patient…</option>',
+    `<optgroup label="OhioT1DM test patients">${patients().map((id) => `<option value="ohio|${esc(id)}">Patient ${esc(id)}</option>`).join('')}</optgroup>`,
+    `<optgroup label="SimGlucose test patients">${simTestPatientIds.map((id) => `<option value="sim|${esc(id)}">${esc(id)}</option>`).join('')}</optgroup>`,
+  ].join('');
+  ['#referencePatient', '#performancePatient'].forEach((selector) => {
+    const select = $(selector);
+    if (!select) return;
+    const value = select.value;
+    select.innerHTML = markup;
+    if (Array.from(select.options).some((option) => option.value === value)) select.value = value;
+  });
+}
+
+async function loadSimReference(patientId) {
+  if (simReferenceCache.has(patientId) || simReferenceLoading.has(patientId)) return;
+  simReferenceLoading.add(patientId);
+  simReferenceFailed.delete(patientId);
+  try {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.simTestPatient}/${encodeURIComponent(patientId)}?horizon=${state.horizon}&case_index=2`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not load SimGlucose patient metrics');
+    simReferenceCache.set(patientId, data);
+  } catch (error) {
+    simReferenceFailed.add(patientId);
+    console.warn(`Could not load SimGlucose reference patient ${patientId}.`, error.message);
+  } finally {
+    simReferenceLoading.delete(patientId);
+    const refSelected = $('#showReferenceEga')?.checked && $('#referencePatient')?.value === `sim|${patientId}`;
+    const perfSelected = $('#showPerformancePatient')?.checked && $('#performancePatient')?.value === `sim|${patientId}`;
+    if (refSelected || perfSelected) renderAll({ animate: false, draw: false });
   }
 }
 
 function buildSimDashboardSample(data) {
   const id = `sim|${data.patient_id}|${$('#simTestCase').value}`;
   const predictions = Object.fromEntries(Object.entries(data.predictions).map(([horizon, item]) => [Number(horizon), item]));
+  const series = [...data.series.history, ...data.series.actual_future];
+  const referenceTime = Date.parse(data.timestamp);
   return {
     id,
     patient: data.patient_id,
     label: `Held-out case · ${data.timestamp}`,
-    series: [...data.series.history, ...data.series.actual_future],
+    series,
+    timestamps: series.map((point) => new Date(referenceTime + point.x * 60_000).toISOString()),
     preds: predictions,
     metrics: data.metrics,
     scatter: data.scatter,
@@ -1989,6 +2255,7 @@ async function loadSimDashboard() {
     if (!response.ok) throw new Error(data.detail || 'Could not load SimGlucose patient data');
     if (requestId !== simDashboardRequestId) return;
     state.simSample = buildSimDashboardSample(data);
+    getActiveForecastContext();
     renderSimTestResults(data);
     renderAll({ animate: true, draw: true });
   } catch (error) {
@@ -2030,7 +2297,6 @@ async function runSimTest() {
   try {
     state.dataset = 'sim';
     state.simPatient = patient;
-    $('#sidebarPatient').value = `sim|${patient}`;
     await loadSimDashboard();
   } catch (error) {
     $('#simTestResults').innerHTML = `<div class="stat"><small>Evaluation</small><b>Failed</b><span>${esc(error.message)}</span></div>`;
@@ -2046,6 +2312,16 @@ function updateUploadHelp() {
   $('#uploadHelp').textContent = multimodal
     ? 'CSV needs timestamp, CGM (mg/dL), and insulin (units per row); CHO (grams per row) is optional and defaults to zero. SimGlucose history columns Time, BG, CGM, CHO, insulin are supported.'
     : 'CSV needs timestamp and glucose (mg/dL), or SimGlucose columns Time and CGM, with at least 25 sequential readings at roughly 5-minute intervals.';
+}
+
+async function detectCsvProfile(file) {
+  const firstLine = (await file.slice(0, 8192).text()).split(/\r?\n/, 1)[0] || '';
+  const headers = (firstLine.match(/("(?:[^"]|"")*"|[^,]*)(?:,|$)/g) || [])
+    .map((part) => part.replace(/,$/, '').trim().replace(/^"|"$/g, '').replace(/""/g, '"').toLowerCase());
+  const hasCgm = headers.includes('cgm');
+  const hasInsulin = headers.includes('insulin');
+  const isSimulation = hasInsulin && (hasCgm || headers.includes('bg') || headers.includes('glucose'));
+  return { headers, isSimulation, isCgmOnly: !isSimulation && (headers.includes('glucose') || headers.includes('bg') || hasCgm) };
 }
 
 async function renderUploadModels() {
@@ -2067,6 +2343,7 @@ async function renderUploadModels() {
 async function uploadAndPredict() {
   const file = $('#uploadCsv').files[0];
   const multimodal = $('#uploadMode').value === 'multimodal';
+  let dataProfile = null;
   const results = $('#uploadResults');
   if (!file) {
     showToast('Choose a CSV file first.', 'warn');
@@ -2082,6 +2359,7 @@ async function uploadAndPredict() {
   let data;
   let requestError;
   try {
+    dataProfile = await detectCsvProfile(file);
     data = await api.predictCsv(file, $('#uploadHorizon').value, multimodal);
   } catch (error) {
     requestError = error;
@@ -2090,25 +2368,35 @@ async function uploadAndPredict() {
   if (remaining > 0) await sleep(remaining);
   try {
     if (requestError) throw requestError;
-    state.lastUploadForecast = data;
+    state.lastUploadForecast = { ...data, selected_model: multimodal ? 'multimodal' : 'cgm', data_profile: dataProfile };
+    state.lastUploadFileName = file.name;
+    $('#askCsvAgent').disabled = false;
+    getActiveForecastContext();
     const predictions = data.predictions || [];
     const disclaimerBanner = `
       <div class="alert-banner disclaimer-banner" style="grid-column: 1 / -1; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.28); border-radius: 8px;">
         <i data-lucide="shield-alert" style="width: 16px; height: 16px; flex-shrink: 0; color: var(--warn);"></i>
         <span style="font-size: 12px; line-height: 1.4; color: var(--text);">
-          <strong style="color: var(--warn);">Clinical Research Disclaimer:</strong> Investigational prototype. Predictions are derived solely from CGM history without insulin or carbohydrate/meal data and are not for clinical or treatment use. Consult your diabetes care team.
+          <strong style="color: var(--warn);">Clinical Research Disclaimer:</strong> Investigational prototype. ${multimodal ? 'The SimGlucose model uses CGM, past insulin, and optional carbohydrate history.' : 'The Ohio model uses CGM history only.'} Predictions are not for clinical or treatment use. Consult your diabetes care team.
         </span>
       </div>
     `;
-    results.innerHTML = disclaimerBanner + predictions.map((item) => stat(
+    const mismatchBanner = !multimodal && dataProfile?.isSimulation
+      ? '<div class="alert-banner danger upload-model-warning" role="alert"><strong>MODEL / DATA MISMATCH:</strong> This CSV looks like SimGlucose data (CGM and insulin columns), but the Ohio CGM-only model was selected. Predictions are shown, but this model ignores insulin and may not match the dataset. Select the SimGlucose model and upload again for a matching evaluation.</div>'
+      : '';
+    results.innerHTML = disclaimerBanner + mismatchBanner + predictions.map((item) => stat(
       `${item.horizon} min forecast`,
       `${mg(item.predicted_glucose)} mg/dL`,
       `Change from latest ${mg(item.change_from_latest)} mg/dL · ${item.zone_label}`,
       item.zone_label === 'low' ? 'bad' : item.zone_label === 'high' ? 'warn' : 'ok'
     )).join('');
+    renderAll({ animate: true, draw: true });
     if (multimodal && data.meal_defaulted_to_zero) showToast('No CHO column found; meals were treated as zero.');
   } catch (error) {
-    results.innerHTML = `<div class="stat"><span class="stat-label">Could not run prediction</span><span class="stat-value">Check CSV</span><span class="stat-detail">${esc(error.message)}</span></div>`;
+    $('#askCsvAgent').disabled = true;
+    const mismatch = multimodal && dataProfile?.isCgmOnly;
+    results.innerHTML = `<div class="alert-banner danger upload-model-error" role="alert"><strong>${mismatch ? 'WRONG MODEL FOR THIS FILE' : 'UPLOAD PREDICTION FAILED'}</strong><p>${mismatch ? 'This CSV appears to contain glucose readings without the CGM + insulin columns required by the SimGlucose model. Choose the Ohio CGM-only model to predict from this file.' : esc(error.message)}</p></div>`;
+    renderAll({ animate: false, draw: true });
   } finally {
     button.disabled = false;
     button.removeAttribute('aria-busy');

@@ -161,6 +161,7 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
             "has_forecast": False,
             "horizon_min": hz,
             "patient_id": str(fc.get("patient_id", context.patient_id)),
+            "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
             "current_glucose_mg_dl": round(float(fc.get("current_glucose", context.latest_glucose)), 1),
             "message": f"No forecast has been run yet for patient {fc.get('patient_id', context.patient_id)}. Inform the user that no patient-specific forecast results are available, and suggest running 'Run Forecast' in the dashboard or uploading CGM CSV data.",
         }
@@ -193,6 +194,7 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
             "zone": zone,
             "timestamp": str(fc.get("timestamp", context.latest_timestamp)),
             "patient_id": str(fc.get("patient_id", context.patient_id)),
+            "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
             "source": fc.get("source", "pipeline"),
         }
         if "actual" in item and item["actual"] is not None:
@@ -229,6 +231,7 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
         "zone": zone,
         "timestamp": context.latest_timestamp,
         "patient_id": context.patient_id,
+        "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
     }
 
 
@@ -290,6 +293,7 @@ def tool_get_recent_glucose(args: dict[str, Any], context: PatientContext, store
 
     return {
         "patient_id": str(fc.get("patient_id", context.patient_id)),
+        "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
         "current_glucose_mg_dl": round(current_val, 1),
         "window_minutes": window_mins,
         "readings_count": len(values),

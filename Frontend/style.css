@@ -526,6 +526,33 @@ h3 {
   gap: 20px;
 }
 
+.upload-agent-review {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.upload-agent-review h2 { margin-bottom: 4px; }
+.upload-agent-review .btn { flex: 0 0 auto; }
+
+.upload-model-warning,
+.upload-model-error { grid-column: 1 / -1; font-size: 14px; font-weight: 500; }
+.upload-model-warning strong,
+.upload-model-error strong { display: block; font-size: 16px; margin-bottom: 4px; }
+.upload-model-error p { margin: 4px 0 0; }
+
+.clinical-reference-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.clinical-reference-toggle { display: inline-flex; align-items: center; gap: 9px; }
+.clinical-reference-controls > label:not(.clinical-reference-toggle) { min-width: 220px; }
+.clinical-reference-controls .muted { flex-basis: 100%; }
+
 .upload-parameters {
   display: flex;
   min-width: 0;
@@ -1430,18 +1457,39 @@ tr.is-selected td { background: rgba(34, 211, 238, 0.08); }
   display: flex;
   flex-direction: column;
   width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
 }
+
+#v-agent {
+  gap: 12px;
+  min-height: calc(100vh - 150px);
+}
+
+#v-agent .view-header p { max-width: none; }
 
 .agent-chat-card {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 160px);
-  min-height: 580px;
-  max-height: 860px;
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 520px;
+  max-height: none;
   padding: 18px 22px 18px;
   width: 100%;
   box-sizing: border-box;
   overflow: hidden;
+}
+
+@media (max-width: 860px) {
+  #v-agent { min-height: 0; }
+  .agent-layout { flex: 0 0 auto; }
+  .agent-chat-card { min-height: 680px; }
+}
+
+@media (max-width: 560px) {
+  .upload-agent-review { align-items: stretch; flex-direction: column; }
+  .upload-agent-review .btn { width: 100%; }
 }
 
 .agent-chat-header {

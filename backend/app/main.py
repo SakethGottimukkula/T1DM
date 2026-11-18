@@ -266,7 +266,9 @@ async def predict_simglucose_csv(file: UploadFile = File(...), horizon: str = Fo
         df = pd.read_csv(io.BytesIO(await file.read()))
     except Exception as exc:
         raise HTTPException(422, f"Could not parse CSV: {exc}")
+    raw_row_count = len(df)
     df.columns = [str(col).strip().lower() for col in df.columns]
+    csv_headers = list(df.columns)
     if "timestamp" not in df.columns and "time" in df.columns:
         df = df.rename(columns={"time": "timestamp"})
     if "timestamp" not in df.columns and "unnamed: 0" in df.columns:
@@ -287,7 +289,9 @@ async def predict_simglucose_csv(file: UploadFile = File(...), horizon: str = Fo
         df["timestamp"] = pd.to_datetime(df["timestamp"], dayfirst=True, errors="coerce")
     for col in ("cgm", "bg", "insulin", "cho"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    invalid_rows = int(df[["timestamp", "cgm", "bg", "insulin"]].isna().any(axis=1).sum())
     df = df.dropna(subset=["timestamp", "cgm", "bg", "insulin"]).sort_values("timestamp")
+    duplicate_timestamps = int(df["timestamp"].duplicated(keep="last").sum())
     df = df.drop_duplicates("timestamp", keep="last").set_index("timestamp")
     df = df.resample("5min").agg({"cgm": "mean", "bg": "mean", "insulin": "sum", "cho": "sum"}).dropna(subset=["cgm", "bg"])
     if len(df) < MIN_HISTORY:
@@ -303,8 +307,37 @@ async def predict_simglucose_csv(file: UploadFile = File(...), horizon: str = Fo
         predicted = float(_sim_models[hz].predict(x)[0])
         predictions.append({"horizon": hz, "predicted_glucose": round(predicted, 2),
                             "change_from_latest": round(predicted - latest, 2), "zone_label": _zone_label(predicted)})
+    evaluation: dict[str, dict[str, object]] = {}
+    for eval_horizon in HORIZONS:
+        target_col = f"target_{eval_horizon}"
+        valid = feature_df.dropna(subset=SIM_FEATURE_COLUMNS + [target_col]).reset_index(drop=True)
+        if valid.empty:
+            continue
+        actual = valid[target_col].to_numpy()
+        predicted = _sim_models[eval_horizon].predict(valid[SIM_FEATURE_COLUMNS].to_numpy(dtype=float))
+        labels, zone_counts = classify_array(actual.tolist(), predicted.tolist())
+        count = len(valid)
+        stride = max(1, int(np.ceil(count / 1500)))
+        evaluation[str(eval_horizon)] = {
+            "n_rows": count,
+            "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 2),
+            "mae": round(float(mean_absolute_error(actual, predicted)), 2),
+            "zone_percentages": {zone: round(zone_counts[zone] * 100 / count, 2) for zone in ["A", "B", "C", "D", "E"]},
+            "points": [
+                {"x": round(float(a), 2), "y": round(float(p), 2), "z": zone}
+                for a, p, zone in zip(actual[::stride], predicted[::stride], labels[::stride])
+            ],
+            "timestamps": [str(ts) for ts in valid["timestamp"].iloc[::stride]],
+            "actual": [round(float(value), 2) for value in actual[::stride]],
+            "predicted": [round(float(value), 2) for value in predicted[::stride]],
+        }
+    history = feature_df.tail(48)[["timestamp", "cgm"]].rename(columns={"cgm": "glucose"})
     return {"predictions": predictions, "latest_glucose": latest, "timestamp": str(last["timestamp"]),
-            "meal_defaulted_to_zero": meal_defaulted}
+            "meal_defaulted_to_zero": meal_defaulted, "headers": csv_headers, "row_count": raw_row_count,
+            "readings": [{"timestamp": str(row.timestamp), "glucose": round(float(row.glucose), 2)} for row in history.itertuples(index=False)],
+            "evaluation": evaluation,
+            "warnings": {"invalid_rows_dropped": invalid_rows, "duplicate_timestamps_removed": duplicate_timestamps,
+                         "rows_resampled_or_missing": max(0, raw_row_count - len(df))}}
 
 
 @app.get("/v1/simglucose/test/patients")
@@ -456,8 +489,10 @@ async def predict_csv(
         df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
         raise HTTPException(422, f"Could not parse CSV: {exc}")
+    raw_row_count = len(df)
 
     df.columns = [str(col).strip().lower() for col in df.columns]
+    csv_headers = list(df.columns)
     if "timestamp" not in df.columns and "time" in df.columns:
         df = df.rename(columns={"time": "timestamp"})
     if "timestamp" not in df.columns and "unnamed: 0" in df.columns:
@@ -487,6 +522,7 @@ async def predict_csv(
         raise HTTPException(422, f"patient_id '{patient_id}' not found. Available: {patients_available}")
     patient_used = patient_id if patient_id is not None else str(patients_available[0])
     df = df[df["patient_id"].astype(str) == patient_used].sort_values("timestamp").reset_index(drop=True)
+    eval_rows = df.copy()
     warnings = {"gaps_outside_3_7_minutes": 0}
     tail_count = 25
     if len(df) < tail_count:
@@ -517,6 +553,33 @@ async def predict_csv(
 
     preds = _predict_horizons(store, features_row, latest_glucose, horizons)
 
+    # Score historical horizons in this upload wherever a future glucose value exists.
+    eval_features = build_features(eval_rows, group_col="patient_id")
+    evaluation: dict[str, dict[str, object]] = {}
+    for eval_horizon in HORIZONS:
+        target_col = f"target_{eval_horizon}"
+        valid = eval_features.dropna(subset=FEATURE_COLUMNS + [target_col]).reset_index(drop=True)
+        if valid.empty:
+            continue
+        actual = valid[target_col].to_numpy()
+        predicted = store._models[eval_horizon].predict(valid[FEATURE_COLUMNS].values)
+        labels, zone_counts = classify_array(actual.tolist(), predicted.tolist())
+        count = len(valid)
+        stride = max(1, int(np.ceil(count / 1500)))
+        evaluation[str(eval_horizon)] = {
+            "n_rows": count,
+            "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 2),
+            "mae": round(float(mean_absolute_error(actual, predicted)), 2),
+            "zone_percentages": {zone: round(zone_counts[zone] * 100 / count, 2) for zone in ["A", "B", "C", "D", "E"]},
+            "points": [
+                {"x": round(float(a), 2), "y": round(float(p), 2), "z": zone}
+                for a, p, zone in zip(actual[::stride], predicted[::stride], labels[::stride])
+            ],
+            "timestamps": [str(ts) for ts in valid["timestamp"].iloc[::stride]],
+            "actual": [round(float(value), 2) for value in actual[::stride]],
+            "predicted": [round(float(value), 2) for value in predicted[::stride]],
+        }
+
     return {
         "predictions": [pred.model_dump() for pred in preds],
         "latest_glucose": latest_glucose,
@@ -524,6 +587,13 @@ async def predict_csv(
         "patient_used": patient_used,
         "patients_available": [str(value) for value in patients_available],
         "warnings": warnings,
+        "headers": csv_headers,
+        "row_count": raw_row_count,
+        "readings": [
+            {"timestamp": str(row.timestamp), "glucose": round(float(row.glucose), 2)}
+            for row in tail[["timestamp", "glucose"]].itertuples(index=False)
+        ],
+        "evaluation": evaluation,
     }
 
 
