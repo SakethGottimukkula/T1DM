@@ -1378,14 +1378,39 @@ function reveal(opts, index) {
 }
 
 function renderOverview(opts = {}) {
+  if (!state.lastUploadForecast?.predictions?.length) {
+    $('#overview-title').textContent = 'Patient Glucose Overview';
+    $('#overviewDescription').textContent = 'Upload a patient’s CGM CSV and run a prediction to populate this overview with their records.';
+    $('#summary').innerHTML = [
+      stat('Current glucose', '—', 'Awaiting patient upload', '', { idle: true }),
+      stat('Current trend', '—', 'Awaiting patient upload', '', { idle: true }),
+      stat('Patient data', '—', 'Upload a CSV to begin', '', { idle: true }),
+      stat('Forecast horizon', '—', 'Awaiting prediction', '', { idle: true }),
+    ].join('');
+    $('#fcards').innerHTML = HZ.map((horizon) =>
+      stat(`${horizon} min forecast`, '—', 'Awaiting patient upload', '', { idle: true })
+    ).join('');
+    $('#riskSummary').innerHTML = '';
+    $('#riskTrajectory').innerHTML = '';
+    const banner = $('#riskAlert');
+    banner.className = 'alert-banner idle';
+    banner.textContent = 'Upload a patient CSV and run a prediction to view patient-specific risk.';
+    $('#interp').textContent = 'Patient-specific glucose history, forecasts, and evaluations will appear here after a CSV upload and prediction.';
+    $('#overviewTrajectoryCard').hidden = document.body.classList.contains('patient-view');
+    if (state.view === 'overview' && !document.body.classList.contains('patient-view')) {
+      const chart = ensureChart('cMain', (canvas) => new Chart(canvas, trajectoryConfig()));
+      if (chart) {
+        chart.data.datasets.forEach((dataset) => { dataset.data = []; });
+        chart.update(reduceMotion ? 'none' : undefined);
+      }
+    }
+    return;
+  }
+
   const sample = currentSample();
-  const simSelected = state.dataset === 'sim';
-  $('#overview-title').textContent = simSelected
-    ? 'SimGlucose Test Forecasting'
-    : 'CGM-Only Blood Glucose Forecasting';
-  $('#overviewDescription').textContent = simSelected
-    ? 'Held-out SimGlucose virtual patient forecasts using CGM, insulin, and meal history at 30 / 60 / 90 / 120 minute horizons.'
-    : 'Predicts future glucose from CGM-only history on the OhioT1DM 2020 cohort, evaluating 30 / 60 / 90 / 120 minute forecast horizons.';
+  $('#overviewTrajectoryCard').hidden = document.body.classList.contains('patient-view');
+  $('#overview-title').textContent = 'Patient Glucose Overview';
+  $('#overviewDescription').textContent = 'Patient glucose records and forecasts from the uploaded CSV.';
   const forecast = currentForecast();
   const ready = Boolean(forecast);
   const trend = trendOf(sample);
@@ -1428,6 +1453,11 @@ function renderOverview(opts = {}) {
 
   renderRisk(opts);
 
+  if (state.view === 'overview' && !document.body.classList.contains('patient-view')) {
+    ensureChart('cMain', (canvas) => new Chart(canvas, trajectoryConfig()));
+    setTrajectory('cMain', opts);
+  }
+
   if (ready) {
     const assessment = forecastRiskOf(forecast);
     const status = sample.isUpload ? { label: 'upload forecast' } : errorStatus(forecast.error);
@@ -1448,10 +1478,6 @@ function renderOverview(opts = {}) {
     $('#interp').innerHTML = `No forecast has been run for patient ${esc(sample.patient)} (${esc(sample.label)}) yet. Pick a horizon in the <button type="button" class="link-btn" data-go="explorer">Test Explorer</button> and press <b>Run Forecast</b> to see the prediction, reference value, and error.`;
   }
 
-  if (state.view === 'overview') {
-    ensureChart('cMain', (canvas) => new Chart(canvas, trajectoryConfig()));
-    setTrajectory('cMain', opts);
-  }
   if (opts.animate) animateCounts(summary);
   if (opts.animate) animateCounts($('#fcards'));
 }
@@ -1525,10 +1551,26 @@ function renderRisk(opts = {}) {
 }
 
 function renderForecast(opts = {}) {
+  if (!state.lastUploadForecast?.predictions?.length) {
+    $('#forecastDescription').textContent = 'Upload a patient’s CGM CSV and run a prediction to view their glucose history and forecast.';
+    $('#errTable').innerHTML = '<tr><th>Horizon</th><th>Forward forecast</th><th>Scored pairs</th><th>RMSE</th><th>Clarke A+B</th><th>Status</th></tr><tr><td colspan="6" class="muted">Patient forecast data will appear here after a CSV upload and prediction.</td></tr>';
+    $('#uploadBacktestCard').hidden = true;
+    if (charts.cUploadBacktest) {
+      charts.cUploadBacktest.data.datasets[0].data = [];
+      charts.cUploadBacktest.update(reduceMotion ? 'none' : undefined);
+    }
+    if (state.view === 'forecast') {
+      const chart = ensureChart('cDetail', (canvas) => new Chart(canvas, trajectoryConfig()));
+      if (chart) {
+        chart.data.datasets.forEach((dataset) => { dataset.data = []; });
+        chart.update(reduceMotion ? 'none' : undefined);
+      }
+    }
+    return;
+  }
+
   const sample = currentSample();
-  $('#forecastDescription').textContent = state.dataset === 'sim'
-    ? 'SimGlucose held-out glucose history, the selected forecast, and future reference values across the selected virtual patient’s test window.'
-    : 'History, a now marker, and the future region showing forecast versus actual held-out value, with the 70–180 mg/dL target range shaded.';
+  $('#forecastDescription').textContent = 'Uploaded patient glucose history, forecasts, and actual-versus-predicted evaluation.';
   const header = sample.isUpload
     ? '<tr><th>Horizon</th><th>Forward forecast</th><th>Scored pairs</th><th>RMSE</th><th>Clarke A+B</th><th>Status</th></tr>'
     : '<tr><th>Horizon</th><th>Predicted</th><th>Actual</th><th>Absolute error</th><th>Clarke</th><th>Status</th></tr>';
@@ -1740,7 +1782,8 @@ function renderClinical() {
 }
 
 function renderPerformance() {
-  if (state.lastUploadForecast?.predictions?.length) {
+  const selected = $('#showPerformancePatient')?.checked ? ($('#performancePatient')?.value || '') : '';
+  if (!selected && state.lastUploadForecast?.predictions?.length) {
     $('#performanceMetricsLayout').hidden = false;
     $('#performanceChartCard').hidden = false;
     $('#modelComparisonCard').hidden = false;
@@ -1764,7 +1807,6 @@ function renderPerformance() {
     }
     return;
   }
-  const selected = $('#showPerformancePatient')?.checked ? ($('#performancePatient')?.value || '') : '';
   if (!selected) {
     $('#performanceMetricsLayout').hidden = true;
     $('#performanceChartCard').hidden = true;
@@ -2083,6 +2125,20 @@ function bindSelects() {
 }
 
 function bindChrome() {
+  const patientViewToggle = $('#patientViewToggle');
+  patientViewToggle?.addEventListener('change', () => {
+    document.body.classList.toggle('patient-view', patientViewToggle.checked);
+    showView('overview');
+  });
+  $('#overviewAgentBtn')?.addEventListener('click', () => {
+    showView('agent');
+    const input = $('#agentInput');
+    input.value = state.lastUploadForecast
+      ? 'Please explain my uploaded glucose history and forecasts, and suggest safe next steps based on the current readings.'
+      : 'Please explain what information I should consider for my glucose and offer general safe guidance.';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+  });
   $('#menuToggle').addEventListener('click', () => {
     const open = !$('#sidebar').classList.contains('open');
     setDrawer(open);
@@ -2138,6 +2194,10 @@ function bindChrome() {
       state.dataset = 'sim';
       state.horizon = Number($('#simTestHorizon').value);
       state.simPatient = $('#simTestPatient').value;
+      $('#simTestResults').innerHTML = '';
+      $('#simTestContext').innerHTML = '';
+      $('#simTestEvents').innerHTML = '';
+      loadSimTestContext();
     });
   });
   $('#uploadMode').addEventListener('change', updateUploadHelp);
@@ -2154,7 +2214,7 @@ function bindChrome() {
     if (!state.lastUploadForecast) return;
     showView('agent');
     const input = $('#agentInput');
-    input.value = `Review my uploaded CSV (${state.lastUploadFileName || 'current upload'}) and suggest concrete improvements to its formatting, timestamps, data quality, and selected model inputs. Use the upload validation and forecast context from this session.`;
+    input.value = `Using the uploaded patient’s glucose history and latest forecast, suggest practical meal ideas and safe physical activity options. Explain how the suggestions relate to the patient’s glucose trend, and do not provide insulin dosing advice.`;
     input.dispatchEvent(new Event('input', { bubbles: true }));
     $('#agentChatForm').requestSubmit();
   });
@@ -2175,7 +2235,9 @@ async function loadSimTestPatients() {
       state.dataset = 'sim';
       state.simPatient = select.value;
       state.horizon = Number($('#simTestHorizon').value || state.horizon);
+      loadSimTestContext();
     });
+    loadSimTestContext();
   } catch (error) {
     simTestPatientIds = [];
     fillSidebarPatients();
@@ -2264,6 +2326,27 @@ async function loadSimDashboard() {
   }
 }
 
+let simContextRequestId = 0;
+async function loadSimTestContext() {
+  const patient = $('#simTestPatient')?.value;
+  if (!patient) return;
+  const requestId = ++simContextRequestId;
+  const horizon = Number($('#simTestHorizon').value || state.horizon);
+  const caseIndex = $('#simTestCase').value || 2;
+  $('#simTestContext').innerHTML = '<div class="stat idle"><small>CGM context</small><b>Loading…</b><span>For the selected patient and case</span></div>';
+  $('#simTestEvents').innerHTML = '';
+  try {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.simTestPatient}/${encodeURIComponent(patient)}?horizon=${horizon}&case_index=${caseIndex}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not load selected patient context');
+    if (requestId !== simContextRequestId) return;
+    renderSimTestContext(data.context);
+  } catch (error) {
+    if (requestId !== simContextRequestId) return;
+    $('#simTestContext').innerHTML = `<div class="stat"><small>CGM context</small><b>Unavailable</b><span>${esc(error.message)}</span></div>`;
+  }
+}
+
 function renderSimTestResults(data) {
   const horizon = Number($('#simTestHorizon').value || state.horizon);
   const selected = data.predictions[String(horizon)];
@@ -2276,7 +2359,11 @@ function renderSimTestResults(data) {
     ['Risk level', risk.label, 'Based on selected forecast glucose', risk.cls],
   ];
   $('#simTestResults').innerHTML = cards.map(([label, value, detail, cls], i) => stat(label, value, detail, cls, { reveal: true, delay: i * 70 })).join('');
-  const context = data.context;
+  renderSimTestContext(data.context);
+  paintIcons();
+}
+
+function renderSimTestContext(context) {
   $('#simTestContext').innerHTML = [
     stat('Current glucose', `${mg(context.current)} mg/dL`, 'At selected forecast time'),
     stat('Rate of change', `${context.roc >= 0 ? '+' : ''}${mg(context.roc)} mg/dL`, 'Recent CGM trend'),
@@ -2777,14 +2864,21 @@ let currentAgentSessionId = 'session_' + Math.random().toString(36).substring(2,
 function bindAgentChat() {
   const form = $('#agentChatForm');
   const input = $('#agentInput');
+  const clearBtn = $('#agentClearBtn');
   const sendBtn = $('#agentSendBtn');
   const thread = $('#agentThread');
+  const chatCard = $('.agent-chat-card');
+  const chatBackdrop = $('#agentChatBackdrop');
+  const expandBtn = $('#agentExpandBtn');
+  const suggestionsToggle = $('#agentSuggestionsToggle');
+  const suggestionsPanel = $('#agentSuggestions');
   const typing = $('#agentTyping');
   const typingStatus = $('#agentTypingStatus');
   const resetBtn = $('#agentResetBtn');
   const headerModel = $('#agentHeaderModel');
   const onlineDot = $('#agentOnlineDot');
   const stickyDisclaimer = $('#agentStickyDisclaimer');
+  let suggestionChosen = false;
 
   if (!form) return;
 
@@ -2793,13 +2887,62 @@ function bindAgentChat() {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
   };
+  const updateClearButton = () => {
+    if (clearBtn) clearBtn.hidden = !input.value;
+  };
 
-  input.addEventListener('input', autoResizeInput);
+  const setChatExpanded = (expanded) => {
+    chatCard?.classList.toggle('is-expanded', expanded);
+    document.body.classList.toggle('agent-chat-expanded', expanded);
+    if (chatBackdrop) chatBackdrop.hidden = !expanded;
+    if (expandBtn) {
+      expandBtn.setAttribute('aria-pressed', String(expanded));
+      expandBtn.setAttribute('aria-label', expanded ? 'Exit full screen chat' : 'Expand chat');
+      expandBtn.title = expanded ? 'Exit full screen' : 'Expand chat';
+      expandBtn.innerHTML = `<i data-lucide="${expanded ? 'minimize-2' : 'maximize-2'}" aria-hidden="true"></i>`;
+      paintIcons();
+    }
+  };
+
+  expandBtn?.addEventListener('click', () => setChatExpanded(!chatCard?.classList.contains('is-expanded')));
+  chatBackdrop?.addEventListener('click', () => setChatExpanded(false));
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && chatCard?.classList.contains('is-expanded')) setChatExpanded(false);
+  });
+
+  input.addEventListener('input', () => {
+    suggestionChosen = false;
+    autoResizeInput();
+    updateClearButton();
+  });
+  clearBtn?.addEventListener('click', () => {
+    input.value = '';
+    suggestionChosen = false;
+    autoResizeInput();
+    updateClearButton();
+    input.focus();
+  });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       form.requestSubmit();
     }
+  });
+
+  suggestionsToggle?.addEventListener('click', () => {
+    const open = suggestionsToggle.getAttribute('aria-expanded') !== 'true';
+    suggestionsToggle.setAttribute('aria-expanded', String(open));
+    if (suggestionsPanel) suggestionsPanel.hidden = !open;
+  });
+
+  $all('[data-agent-prompt]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      suggestionChosen = true;
+      input.value = chip.dataset.agentPrompt;
+      autoResizeInput();
+      updateClearButton();
+      input.focus();
+    });
   });
 
   api.agentHealth().then((health) => {
@@ -2811,14 +2954,6 @@ function bindAgentChat() {
     }
   });
 
-  $all('[data-agent-prompt]').forEach((chip) => {
-    chip.addEventListener('click', () => {
-      input.value = chip.dataset.agentPrompt;
-      autoResizeInput();
-      input.focus();
-    });
-  });
-
   if (resetBtn) {
     resetBtn.addEventListener('click', async () => {
       resetBtn.disabled = true;
@@ -2826,6 +2961,9 @@ function bindAgentChat() {
         await api.agentReset(currentAgentSessionId);
         currentAgentSessionId = 'session_' + Math.random().toString(36).substring(2, 9);
         if (stickyDisclaimer) stickyDisclaimer.hidden = true;
+        suggestionChosen = false;
+        if (suggestionsPanel) suggestionsPanel.hidden = true;
+        suggestionsToggle?.setAttribute('aria-expanded', 'false');
         thread.innerHTML = `
           <div class="agent-msg assistant">
             <div class="msg-avatar"><i data-lucide="bot"></i></div>
@@ -2864,7 +3002,13 @@ function bindAgentChat() {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const query = input.value.trim();
-    if (!query) return;
+    if (!query || sendBtn.disabled) return;
+
+    if (suggestionChosen) {
+      suggestionsPanel.hidden = true;
+      suggestionsToggle?.setAttribute('aria-expanded', 'false');
+      suggestionChosen = false;
+    }
 
     if (stickyDisclaimer) {
       stickyDisclaimer.hidden = false;
@@ -2876,13 +3020,14 @@ function bindAgentChat() {
     thread.appendChild(userMsgEl);
     input.value = '';
     input.style.height = 'auto';
+    updateClearButton();
     thread.scrollTop = thread.scrollHeight;
 
     if (typing) {
       typing.hidden = false;
       if (typingStatus) typingStatus.textContent = 'Running models & reasoning…';
     }
-    input.disabled = true;
+    requestAnimationFrame(() => { thread.scrollTop = thread.scrollHeight; });
     sendBtn.disabled = true;
     sendBtn.setAttribute('aria-busy', 'true');
     sendBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
@@ -2896,33 +3041,11 @@ function bindAgentChat() {
         await sleep(900 - elapsed);
       }
 
-      let toolsHtml = '';
-      if (data.tool_calls && data.tool_calls.length > 0) {
-        const chipsHtml = data.tool_calls.map((tc) => `
-          <div class="tool-chip">
-            <div class="tool-chip-header">
-              <span class="tool-name">${esc(tc.name)}</span>
-            </div>
-            <pre class="tool-json">${esc(JSON.stringify(tc.result, null, 2))}</pre>
-          </div>
-        `).join('');
-
-        toolsHtml = `
-          <div class="msg-tools-wrap">
-            <details class="tools-details" open>
-              <summary><i data-lucide="wrench"></i> Tools Used (${data.tool_calls.length})</summary>
-              <div class="tools-body">${chipsHtml}</div>
-            </details>
-          </div>
-        `;
-      }
-
       const assistantMsgEl = document.createElement('div');
       assistantMsgEl.className = 'agent-msg assistant';
       assistantMsgEl.innerHTML = `
         <div class="msg-avatar"><i data-lucide="bot"></i></div>
         <div class="msg-content">
-          ${toolsHtml}
           <div class="msg-body">${renderMarkdown(data.answer)}</div>
         </div>
       `;
@@ -2952,8 +3075,6 @@ function bindAgentChat() {
       thread.scrollTop = thread.scrollHeight;
     } finally {
       if (typing) typing.hidden = true;
-      input.disabled = false;
-      input.focus();
       sendBtn.disabled = false;
       sendBtn.removeAttribute('aria-busy');
       sendBtn.innerHTML = '<i data-lucide="send" aria-hidden="true"></i><span>Send</span>';
