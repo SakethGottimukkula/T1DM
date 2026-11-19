@@ -1,5 +1,15 @@
 # Glucose Horizon Backend
 
+## Patient dataset access and context (2026-11-19)
+
+The Forecast Agent uses only the successfully uploaded patient dataset as its patient-specific source. It does not fall back to a built-in/default test patient. Before an upload, the UI states that patient context cannot be determined and there is no active uploaded-patient context.
+
+The upload path stores a sanitized, in-memory dataset under an opaque identifier for the agent's dataset query tool. This supports timestamped questions about available patient measurements (such as glucose or heart rate) while excluding code, model internals, project files, and unrelated system information from agent tools/context. Uploads are not used to train or fine-tune models. This context is temporary and does not persist across backend restarts.
+
+## Frontend updates (2026-11-19)
+
+The dashboard now has a light warm-white, navy, coral, marigold, and sky visual system with responsive layouts. The sidebar uses animated active/hover states and staggered entrance motion, with reduced-motion support. Test Explorer aligns Ohio and SimGlucose panel layouts; SimGlucose forecast loading now uses the same animated placeholders and progress steps as Ohio. Upload controls use a desktop two-column layout, and model/data mismatch alerts span the full results area.
+
 FastAPI service for the project's two separate blood-glucose forecasting paths:
 
 - OhioT1DM CGM-only models, which remain the existing default models and backtest path.

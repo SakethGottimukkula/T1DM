@@ -114,3 +114,7 @@ curl.exe "http://127.0.0.1:8000/agent/chat/stream?session_id=session_123&message
 - **CGM-Only Context**: Forecast models predict trajectory from CGM history alone without insulin or meal inputs; unrecorded insulin or carbohydrates will alter real-world trajectory.
 - **Zero Hallucination**: Every numeric prediction, trend rate, or metric is sourced directly from tool calls.
 - **Strict Dosing Refusal**: The agent does not calculate or recommend insulin doses, bolus adjustments, carb ratios, or correction factors. Narrow sentence-level sanitization removes actionable dosing directives while preserving safe educational and wellness guidance. Always consult your diabetes care team before altering medications or insulin doses.
+
+## Patient dataset access boundary (2026-11-19)
+
+Patient-specific answers must use only a successfully uploaded patient dataset. Do not use a default/test patient when no upload exists; state that patient context cannot be determined. The uploaded dataset query capability is for patient measurements and clinical readings, including timestamped lookups when available. Do not expose code, model internals, project files, or unrelated system information through agent tools or answers. Uploaded context is sanitized and kept in temporary backend memory; it is not used for model training.

@@ -1,5 +1,13 @@
 # Glucose Horizon
 
+## Interface and patient-context updates (2026-11-19)
+
+- The dashboard uses a light warm-white, navy, coral, marigold, and sky palette with DM Sans typography, responsive layouts, compact cards, and chart color conventions.
+- Sidebar navigation has layered depth, animated active and hover states, staggered entrance motion, and reduced-motion support. Cursor particles remain behind page content.
+- Test Explorer presents OhioT1DM and SimGlucose panels with matching stacked section structure, aligned controls, results, and context. SimGlucose forecasts show animated loading placeholders and progress steps like Ohio forecasts.
+- The upload page places a large file chooser beside stacked model and horizon controls on desktop, and stacks them on narrow screens. Model/data mismatch alerts span the results area as continuous messages.
+- Forecast Agent patient context comes only from an active uploaded CSV. Without an upload, patient context cannot be determined. Dataset queries are limited to patient measurements and clinical readings; code and unrelated project information are excluded.
+
 Glucose Horizon is a multi-horizon blood-glucose forecasting project for Type 1 diabetes. It includes a FastAPI backend and a browser dashboard. Forecast horizons are 30, 60, 90, and 120 minutes.
 
 The app has two prediction paths:
