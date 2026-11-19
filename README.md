@@ -1,6 +1,6 @@
 # Glucose Horizon
 
-Glucose Horizon is a multi-horizon blood-glucose forecasting project for Type 1 diabetes. It includes a FastAPI backend and a browser dashboard. Forecast horizons are 30, 60, 90, and 120 minutes.
+Glucose Horizon is a multi horizon blood-glucose forecasting project for Type 1 diabetes. It includes a FastAPI backend and a browser dashboard. Forecast horizons are 30, 60, 90, and 120 minutes.
 
 The app has two prediction paths:
 
