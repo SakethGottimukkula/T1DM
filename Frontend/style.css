@@ -316,6 +316,12 @@ main {
   transform: translateY(8px);
 }
 
+.sim-test-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
 .view.active {
   display: flex;
   animation: view-in 320ms ease both;

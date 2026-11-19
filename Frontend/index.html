@@ -175,10 +175,12 @@
           <h3>Recent events</h3><ul id="events"></ul>
         </div>
 
-        <div class="card" id="simTestSection">
-          <h2>SimGlucose test set</h2>
-          <p class="muted">Held-out virtual patients. These evaluation models were trained on the other 24 patients; upload predictions use the separate model trained on all 30.</p>
-          <div class="controls">
+        <div class="sim-test-layout" id="simTestSection">
+          <div class="card">
+            <h2>SimGlucose test set</h2>
+            <p class="muted">Held-out virtual patients. These evaluation models were trained on the other 24 patients; upload predictions use the separate model trained on all 30.</p>
+          </div>
+          <div class="card controls">
             <label>Virtual patient
               <select id="simTestPatient" aria-label="Select held-out SimGlucose patient"></select>
             </label>
@@ -197,7 +199,7 @@
             <button type="button" class="btn primary" id="runSimTest"><i data-lucide="play" aria-hidden="true"></i><span>Run Forecast</span></button>
           </div>
           <div class="grid5" id="simTestResults" aria-live="polite"></div>
-          <div class="card" style="margin-top: 1rem">
+          <div class="card">
             <h3>CGM context</h3>
             <p class="muted">Recent CGM, insulin, and meal context for the selected simulated forecast window.</p>
             <div class="grid5" id="simTestContext"></div>
