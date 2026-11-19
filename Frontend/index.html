@@ -244,11 +244,16 @@
         <div class="two">
           <div class="card" id="clarkePlotCard" hidden>
             <h2>Clarke Error Grid</h2>
-            <div class="chart sq"><canvas id="cClarke" aria-label="Clarke Error Grid scatter chart"></canvas></div>
+            <div class="ega-plot-layout">
+              <div class="chart sq"><canvas id="cClarke" aria-label="Clarke Error Grid scatter chart"></canvas></div>
+            </div>
           </div>
           <div class="card" id="clarkeZonesCard" hidden>
             <h2>Zone distribution</h2>
             <div id="zones"></div>
+            <label id="uploadEgaHorizonControl" hidden>Upload EGA horizon
+              <select id="uploadEgaHorizon" aria-label="Choose upload EGA horizon"><option value="30">30 min</option><option value="60">60 min</option><option value="90">90 min</option><option value="120">120 min</option></select>
+            </label>
             <p class="muted ega-zone-key"><strong>Zone guide:</strong> A and B are generally clinically acceptable. C, D, and E fall outside those regions and need closer review.</p>
             <p id="clarkeNote" class="muted">
               Zones A and B are generally treated as clinically acceptable in the literature.
@@ -372,6 +377,10 @@
             <label>Forecast horizon
               <select id="uploadHorizon" aria-label="Choose forecast horizon">
                 <option value="all">All horizons</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+                <option value="90">90 min</option>
+                <option value="120">120 min</option>
               </select>
             </label>
             <button type="button" class="btn primary upload-submit" id="uploadRun">
@@ -448,7 +457,17 @@
                 <div class="msg-avatar"><i data-lucide="bot"></i></div>
                 <div class="msg-content">
                   <div class="msg-body">
-                    <p>Upload a patient CSV to determine the context for this conversation. Until then, the agent will not use demo or test-patient data.</p>
+                    <p><strong>👋 Hello! I’m your T1D Forecasting &amp; Wellness Assistant.</strong> I’m here to make your glucose data easier to understand and help you explore your forecast.</p>
+                    <p>Once patient data is uploaded, I can help with:</p>
+                    <ul>
+                      <li>📊 <strong>Your readings:</strong> Look up glucose and other recorded measurements at specific times, and spot trends together.</li>
+                      <li>🔮 <strong>Your forecast:</strong> Explore predictions at 30, 60, 90, and 120 minutes and what they mean.</li>
+                      <li>🥗 <strong>Meals &amp; nutrition:</strong> Find general meal ideas and simple ways to balance a plate.</li>
+                      <li>🏃 <strong>Movement:</strong> Get practical, general activity ideas.</li>
+                      <li>💧 <strong>Low or high readings:</strong> Review general safety information and when to follow your care plan or contact your care team.</li>
+                    </ul>
+                    <div class="agent-welcome-disclaimer"><strong>Research prototype:</strong> Responses use uploaded patient information only for patient-specific answers. This is not medical advice, diagnosis, or insulin-dosing guidance. Follow your care plan and consult your clinician.</div>
+                    <p><em>✨ Patient-specific answers are available after you upload a CSV. Without an upload, patient context can’t be determined—no demo or test-patient data is used.</em></p>
                   </div>
                 </div>
               </div>

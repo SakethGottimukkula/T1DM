@@ -189,13 +189,16 @@ function initCursorDots() {
           if (distance >= radius) continue;
           const fade = 1 - distance / radius;
           ctx.globalAlpha = pointer.opacity * fade * fade * 0.56;
-          ctx.fillStyle = '#E5573B';
+          ctx.fillStyle = '#1F426B';
+          ctx.shadowColor = 'rgba(31, 66, 107, 0.52)';
+          ctx.shadowBlur = 7;
           ctx.beginPath();
           ctx.arc(x, y, 1.15, 0, Math.PI * 2);
           ctx.fill();
         }
       }
     }
+    ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
     if (pointer.opacity > 0.005 || pointer.targetOpacity > 0) frame = requestAnimationFrame(draw);
     else frame = 0;
@@ -574,7 +577,8 @@ function getActiveForecastContext() {
     const predsMap = {};
     const latestGlucose = upload.latest_glucose ?? null;
     const timestamp = upload.timestamp || null;
-    upload.predictions.forEach((p) => {
+    const agentPredictions = upload.agent_predictions || upload.predictions;
+    agentPredictions.forEach((p) => {
       predsMap[p.horizon] = {
         predicted: p.predicted_glucose,
         change: p.change_from_latest,
@@ -1047,8 +1051,8 @@ function trajectoryConfig() {
         },
         {
           label: 'Actual future (held out)',
-          borderColor: '#F5B83D',
-          backgroundColor: '#F5B83D',
+          borderColor: '#4DA3E0',
+          backgroundColor: '#4DA3E0',
           borderWidth: 1.8,
           pointRadius: 0,
           tension: 0.3,
@@ -1056,8 +1060,8 @@ function trajectoryConfig() {
         },
         {
           label: 'Forecast',
-          borderColor: COLORS.accent,
-          backgroundColor: COLORS.accent,
+          borderColor: '#24697C',
+          backgroundColor: '#24697C',
           borderWidth: 1.8,
           borderDash: [6, 4],
           pointRadius: 4,
@@ -1147,8 +1151,8 @@ function setTrajectory(id, opts = {}) {
     return HZ[context.dataIndex - 1] === state.horizon ? 7 : 3;
   };
   chart.data.datasets[2].pointBackgroundColor = (context) => {
-    if (context.dataIndex === 0) return COLORS.accent;
-    return HZ[context.dataIndex - 1] === state.horizon ? COLORS.accent : 'rgba(31, 42, 68, 0.52)';
+    if (context.dataIndex === 0) return '#24697C';
+    return HZ[context.dataIndex - 1] === state.horizon ? '#24697C' : 'rgba(31, 42, 68, 0.52)';
   };
 
   const duration = reduceMotion ? 0 : opts.draw ? (opts.animate ? 1400 : 700) : 0;
@@ -1711,6 +1715,10 @@ function renderClinical() {
   const referenceValue = $('#referencePatient')?.value || '';
   const [referenceDataset, referencePatient] = referenceValue.split('|');
   if (referenceEnabled && referenceDataset && referencePatient) {
+    const referenceEgaControl = $('#uploadEgaHorizonControl');
+    const referenceEgaSelect = $('#uploadEgaHorizon');
+    if (referenceEgaControl) referenceEgaControl.hidden = false;
+    if (referenceEgaSelect) referenceEgaSelect.value = String(state.horizon);
     $('#clarkePlotCard').hidden = false;
     $('#clarkeZonesCard').hidden = false;
     const simReference = referenceDataset === 'sim' ? simReferenceCache.get(referencePatient) : null;
@@ -1750,7 +1758,14 @@ function renderClinical() {
     if (referenceDataset === 'sim' && !simReference && !simReferenceLoading.has(referencePatient) && !simReferenceFailed.has(referencePatient)) loadSimReference(referencePatient);
     return;
   }
+  const inactiveEgaControl = $('#uploadEgaHorizonControl');
+  if (inactiveEgaControl) inactiveEgaControl.hidden = true;
   if (sample.isUpload) {
+    const uploadEgaControl = $('#uploadEgaHorizonControl');
+    const uploadEgaSelect = $('#uploadEgaHorizon');
+    const allUploadHorizons = state.lastUploadForecast.requested_horizon === 'all';
+    if (uploadEgaControl) uploadEgaControl.hidden = !allUploadHorizons;
+    if (uploadEgaSelect) uploadEgaSelect.value = String(state.horizon);
     const evaluation = state.lastUploadForecast.evaluation?.[String(state.horizon)];
     $('#clarkePlotCard').hidden = !evaluation;
     $('#clarkeZonesCard').hidden = !evaluation;
@@ -2131,6 +2146,10 @@ function bindSelects() {
     state.lastUploadForecast = null;
     renderAll({ animate: false, draw: true });
   });
+  $('#uploadEgaHorizon')?.addEventListener('change', (event) => {
+    state.horizon = Number(event.currentTarget.value);
+    renderAll({ animate: false, draw: true });
+  });
 }
 
 function bindChrome() {
@@ -2311,7 +2330,7 @@ function buildSimDashboardSample(data) {
   };
 }
 
-async function loadSimDashboard() {
+async function loadSimDashboard(options = {}) {
   const patient = state.simPatient || $('#simTestPatient').value;
   if (!patient) return;
   state.dataset = 'sim';
@@ -2327,6 +2346,11 @@ async function loadSimDashboard() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not load SimGlucose patient data');
     if (requestId !== simDashboardRequestId) return;
+    if (options.startedAt !== undefined && options.delayMs) {
+      const remaining = options.delayMs - (performance.now() - options.startedAt);
+      if (remaining > 0) await sleep(remaining);
+      if (requestId !== simDashboardRequestId) return;
+    }
     simResults.classList.remove('is-loading');
     state.simSample = buildSimDashboardSample(data);
     getActiveForecastContext();
@@ -2407,7 +2431,9 @@ async function runSimTest() {
   try {
     state.dataset = 'sim';
     state.simPatient = patient;
-    await loadSimDashboard();
+    const startedAt = performance.now();
+    const delayMs = 1500 + Math.random() * 1000;
+    await loadSimDashboard({ startedAt, delayMs });
   } catch (error) {
     $('#simTestResults').innerHTML = `<div class="stat"><small>Evaluation</small><b>Failed</b><span>${esc(error.message)}</span></div>`;
   } finally {
@@ -2471,7 +2497,9 @@ async function uploadAndPredict() {
   let requestError;
   try {
     dataProfile = await detectCsvProfile(file);
-    data = await api.predictCsv(file, $('#uploadHorizon').value, multimodal);
+    // Keep all horizon records available to dashboard views; the selected horizon
+    // controls which upload cards are shown and which EGA is selected.
+    data = await api.predictCsv(file, 'all', multimodal);
   } catch (error) {
     requestError = error;
   }
@@ -2479,9 +2507,34 @@ async function uploadAndPredict() {
   if (remaining > 0) await sleep(remaining);
   try {
     if (requestError) throw requestError;
+    const requestedHorizon = $('#uploadHorizon').value;
+    if (requestedHorizon !== 'all') state.horizon = Number(requestedHorizon);
+    const selectedModel = multimodal ? 'multimodal' : 'cgm';
+    const previousUpload = state.lastUploadForecast;
+    const newAgentPredictions = requestedHorizon === 'all'
+      ? [...(data.predictions || [])]
+      : (data.predictions || []).filter((item) => Number(item.horizon) === Number(requestedHorizon));
+    const samePatientHistory = previousUpload &&
+      previousUpload.row_count === data.row_count &&
+      previousUpload.patient_used === data.patient_used &&
+      previousUpload.timestamp === data.timestamp &&
+      Array.isArray(previousUpload.readings) && Array.isArray(data.readings) &&
+      previousUpload.readings.length === data.readings.length &&
+      previousUpload.readings.every((row, index) => row.timestamp === data.readings[index]?.timestamp && Number(row.glucose) === Number(data.readings[index]?.glucose));
+    const sameForecastFamily = samePatientHistory && previousUpload.selected_model === selectedModel;
+    const mergedAgentPredictions = new Map();
+    if (sameForecastFamily) {
+      (previousUpload.agent_predictions || []).forEach((item) => mergedAgentPredictions.set(Number(item.horizon), item));
+    }
+    newAgentPredictions.forEach((item) => mergedAgentPredictions.set(Number(item.horizon), item));
     state.lastUploadForecast = {
       ...data,
-      selected_model: multimodal ? 'multimodal' : 'cgm',
+      requested_horizon: requestedHorizon,
+      agent_predictions: [...mergedAgentPredictions.values()],
+      dataset_context_key: samePatientHistory
+        ? previousUpload.dataset_context_key
+        : `patient-data-${Math.random().toString(36).slice(2, 11)}`,
+      selected_model: selectedModel,
       data_profile: dataProfile,
       agentContextId: data.agent_dataset_id || '',
     };
@@ -2489,7 +2542,7 @@ async function uploadAndPredict() {
     $('#askCsvAgent').disabled = !hasUploadedPatientContext();
     getActiveForecastContext();
     document.dispatchEvent(new Event('agent-upload-context-change'));
-    const predictions = data.predictions || [];
+    const predictions = (data.predictions || []).filter((item) => requestedHorizon === 'all' || Number(item.horizon) === Number(requestedHorizon));
     const disclaimerBanner = `
       <div class="alert-banner disclaimer-banner" style="grid-column: 1 / -1; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.28); border-radius: 8px;">
         <i data-lucide="shield-alert" style="width: 16px; height: 16px; flex-shrink: 0; color: var(--warn);"></i>
@@ -2917,16 +2970,45 @@ function bindAgentChat() {
     <div class="agent-msg assistant">
       <div class="msg-avatar"><i data-lucide="bot" aria-hidden="true"></i></div>
       <div class="msg-content"><div class="msg-body">
+        <p><strong>👋 Hello! I’m your T1D Forecasting &amp; Wellness Assistant.</strong> I’m here to make your glucose data easier to understand and help you explore your forecast.</p>
         <p>${hasUploadedPatientContext()
-          ? `This conversation is using the uploaded patient context from <strong>${esc(state.lastUploadFileName || 'your CSV')}</strong>. No demo or test-patient data is used.`
-          : 'No patient upload has been completed. Patient context cannot be determined, so the Forecast Agent is unavailable until you upload a CSV.'}</p>
+          ? `This conversation is using <strong>${esc(state.lastUploadFileName || 'your uploaded CSV')}</strong>. No demo or test-patient data is used.`
+          : '<em>No upload has been completed, so patient context cannot be determined. No demo or test-patient data is used.</em>'}</p>
+        <p>With uploaded patient data, I can help with:</p>
+        <ul><li>📊 <strong>Your readings:</strong> Look up glucose and other recorded measurements at specific times, and spot trends together.</li><li>🔮 <strong>Your forecast:</strong> Explore predictions at 30, 60, 90, and 120 minutes and what they mean.</li><li>🥗 <strong>Meals &amp; nutrition:</strong> Find general meal ideas and simple ways to balance a plate.</li><li>🏃 <strong>Movement:</strong> Get practical, general activity ideas.</li><li>💧 <strong>Low or high readings:</strong> Review general safety information and when to follow your care plan or contact your care team.</li></ul>
+        <div class="agent-welcome-disclaimer"><strong>Research prototype:</strong> Patient-specific answers use uploaded patient information only. This is not medical advice, diagnosis, or insulin-dosing guidance. Follow your care plan and consult your clinician.</div>
+        <p><em>✨ Patient-specific answers are grounded in available uploaded data or model output.</em></p>
       </div></div>
     </div>`;
+
+  thread?.addEventListener('click', async (event) => {
+    const copyButton = event.target.closest('[data-copy-prompt]');
+    if (!copyButton) return;
+    const promptText = copyButton.closest('.agent-msg')?.querySelector('.msg-body')?.innerText?.trim();
+    if (!promptText) return;
+    try {
+      await navigator.clipboard.writeText(promptText);
+      copyButton.setAttribute('aria-label', 'Prompt copied');
+      copyButton.innerHTML = '<i data-lucide="check" aria-hidden="true"></i><span>Copied</span>';
+      paintIcons();
+      window.setTimeout(() => {
+        if (!copyButton.isConnected) return;
+        copyButton.setAttribute('aria-label', 'Copy prompt');
+        copyButton.innerHTML = '<i data-lucide="copy" aria-hidden="true"></i><span>Copy</span>';
+        paintIcons();
+      }, 1600);
+    } catch {
+      showToast('Could not copy this prompt. Select its text and copy it manually.', 'warn');
+    }
+  });
 
   const syncAgentContextUi = () => {
     const available = hasUploadedPatientContext();
     const upload = state.lastUploadForecast;
-    const contextId = available ? upload.agent_dataset_id : '';
+    // The backend issues a fresh opaque ID on every upload request. Use the
+    // stable content key so re-running another horizon for the same readings
+    // keeps the current conversation and its context intact.
+    const contextId = available ? (upload.dataset_context_key || upload.agent_dataset_id || '') : '';
 
     if (contextId !== activeContextId) {
       const previousSessionId = currentAgentSessionId;
@@ -3080,8 +3162,9 @@ function bindAgentChat() {
 
     const userMsgEl = document.createElement('div');
     userMsgEl.className = 'agent-msg user';
-    userMsgEl.innerHTML = `<div class="msg-body">${esc(query)}</div>`;
+    userMsgEl.innerHTML = `<div class="msg-body">${esc(query)}</div><button type="button" class="agent-copy-btn" data-copy-prompt aria-label="Copy prompt"><i data-lucide="copy" aria-hidden="true"></i><span>Copy</span></button>`;
     thread.appendChild(userMsgEl);
+    paintIcons();
     input.value = '';
     input.style.height = 'auto';
     updateClearButton();
@@ -3103,8 +3186,8 @@ function bindAgentChat() {
       if (requestSessionId !== currentAgentSessionId) return;
 
       const elapsed = performance.now() - startTime;
-      if (elapsed < 900) {
-        await sleep(900 - elapsed);
+      if (elapsed < 2000) {
+        await sleep(2000 - elapsed);
       }
 
       const assistantMsgEl = document.createElement('div');

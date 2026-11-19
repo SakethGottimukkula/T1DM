@@ -15,6 +15,8 @@ from .guardrails import (
     RESEARCH_DISCLAIMER,
     SCOPE_REFUSAL,
     SYSTEM_PROMPT,
+    HYPO_SAFETY_RESPONSE,
+    is_hypo_action_request,
     is_out_of_scope_request,
     post_process_response,
 )
@@ -100,6 +102,15 @@ class T1DMAgent:
                 "latency_ms": round((time.perf_counter() - start_time) * 1000, 1),
                 "tokens": {"prompt": 0, "completion": 0},
             }
+        if is_hypo_action_request(message):
+            return {
+                "answer": HYPO_SAFETY_RESPONSE,
+                "tool_calls": [],
+                "disclaimer": RESEARCH_DISCLAIMER,
+                "session_id": session_id,
+                "latency_ms": round((time.perf_counter() - start_time) * 1000, 1),
+                "tokens": {"prompt": 0, "completion": 0},
+            }
         active_context = context
         effort = select_reasoning_effort(message)
 
@@ -116,10 +127,17 @@ class T1DMAgent:
                     "[ACTIVE UPLOAD CONTEXT: No active forecast is available. For forecast questions, use the uploaded patient glucose history only and state that no forecast is available.]"
                 )
             else:
+                available_horizons = sorted((fc.get("predictions") or {}).keys(), key=lambda value: int(value))
+                horizon_note = (
+                    f" Available uploaded prediction horizons: {', '.join(f'{value} min' for value in available_horizons)}."
+                    if available_horizons else " No uploaded prediction horizons are available."
+                )
                 ctx_note = (
                     "[ACTIVE UPLOAD CONTEXT: This turn is linked to the currently uploaded patient dataset. "
                     "Use patient-data tools for exact measurements and the active uploaded forecast for exact prediction values. "
-                    "Ignore older patient context in conversation history.]"
+                    "Never calculate or estimate glucose forecasts. If a requested horizon is unavailable, say so and ask the user to select it or all horizons in CSV Upload and run Upload & Predict again."
+                    " For forecast timing, report the tool's forecast_for_timestamp (origin plus the horizon), not the current/origin timestamp; preserve its timezone and do not invent UTC for timezone-naive data."
+                    f"{horizon_note} Ignore older patient context in conversation history.]"
                 )
             messages.append({"role": "system", "content": ctx_note})
 

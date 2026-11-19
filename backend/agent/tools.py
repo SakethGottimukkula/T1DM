@@ -183,6 +183,11 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
         pred_val = round(float(item.get("predicted", item.get("predicted_glucose", 0.0))), 1)
         cur_val = round(float(fc.get("current_glucose", context.latest_glucose)), 1)
         change_val = round(float(item.get("change", item.get("change_from_latest", pred_val - cur_val))), 1)
+        origin_timestamp = str(fc.get("timestamp", context.latest_timestamp))
+        try:
+            forecast_timestamp = (pd.Timestamp(origin_timestamp) + pd.Timedelta(minutes=hz)).isoformat()
+        except (TypeError, ValueError):
+            forecast_timestamp = None
         zone = item.get("zone", item.get("zone_label"))
         if not zone or zone in ("low", "high"):
             if pred_val < 54:
@@ -202,7 +207,9 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
             "current_glucose_mg_dl": cur_val,
             "change_mg_dl": change_val,
             "zone": zone,
-            "timestamp": str(fc.get("timestamp", context.latest_timestamp)),
+            "timestamp": forecast_timestamp or origin_timestamp,
+            "forecast_origin_timestamp": origin_timestamp,
+            "forecast_for_timestamp": forecast_timestamp,
             "patient_id": str(fc.get("patient_id", context.patient_id)),
             "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
             "source": fc.get("source", "pipeline"),
@@ -215,33 +222,15 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
             res["clarke_zone"] = item["clarke_zone"]
         return res
 
-    # Fallback to direct model evaluation via store
-    if not store.is_loaded(hz):
-        store.load(hz)
-    pred = store.predict(context.features_dict, hz)
-    pred_val = round(float(pred), 1)
-    change = round(pred_val - context.latest_glucose, 1)
-
-    if pred_val < 54:
-        zone = "severe_hypoglycemia"
-    elif pred_val < 70:
-        zone = "hypoglycemia"
-    elif pred_val > 250:
-        zone = "severe_hyperglycemia"
-    elif pred_val > 180:
-        zone = "hyperglycemia"
-    else:
-        zone = "in_range"
-
     return {
+        "status": "horizon_unavailable",
+        "has_forecast": False,
         "horizon_min": hz,
-        "predicted_glucose_mg_dl": pred_val,
-        "current_glucose_mg_dl": round(context.latest_glucose, 1),
-        "change_mg_dl": change,
-        "zone": zone,
-        "timestamp": context.latest_timestamp,
-        "patient_id": context.patient_id,
-        "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
+        "available_horizons": sorted(int(value) for value in preds) if isinstance(preds, dict) else [],
+        "message": (
+            f"No uploaded forecast is available for {hz} minutes. Do not calculate or estimate one. "
+            "Tell the user which horizons are available and ask them to select the requested horizon or all horizons in CSV upload, then upload and predict again."
+        ),
     }
 
 
@@ -261,8 +250,20 @@ def tool_get_all_forecasts(args: dict[str, Any], context: PatientContext, store:
             "forecasts": [],
         }
 
+    available = fc.get("predictions")
+    if not isinstance(available, dict) or not available:
+        return {
+            "status": "no_forecast_available",
+            "has_forecast": False,
+            "patient_id": pt_id,
+            "current_glucose_mg_dl": cur_val,
+            "forecasts": [],
+            "message": "No uploaded forecast values are available. Do not calculate or estimate glucose predictions.",
+        }
     results = []
     for hz in HORIZONS:
+        if str(hz) not in available and hz not in available:
+            continue
         res = tool_get_forecast({"horizon_min": hz}, context, store)
         results.append(res)
     return {
@@ -657,7 +658,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_forecast",
-            "description": "Run the calibrated XGBoost model to get blood glucose forecast for a specific horizon (30, 60, 90, or 120 minutes).",
+            "description": "Retrieve an already generated prediction for the active uploaded patient at a specific horizon. Never generate or estimate a forecast. Only horizons available in the active upload context can be returned.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -675,7 +676,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_all_forecasts",
-            "description": "Run and return future blood glucose predictions for all 4 horizons (30, 60, 90, and 120 minutes) simultaneously.",
+            "description": "Retrieve only the already generated predictions available in the active uploaded patient context. Do not generate missing horizons.",
             "parameters": {
                 "type": "object",
                 "properties": {},
