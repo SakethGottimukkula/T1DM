@@ -2,7 +2,7 @@
 *.csv
 
 # Trained models (regenerate via train_models.py)
-backend/models/*.json
+# backend/models/*.json
 
 # Python
 __pycache__/
