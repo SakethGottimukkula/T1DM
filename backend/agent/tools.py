@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -13,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.config import GLUCOSE_MAX, GLUCOSE_MIN, HORIZONS, MIN_HISTORY
 from app.features import FEATURE_COLUMNS, build_features_single
 from app.predictor import ModelStore
+from .patient_data import normalize_column_name
 
 # Benchmark model performance metrics on OhioT1DM held-out test cohort
 STORED_PERFORMANCE: dict[int, dict[str, float]] = {
@@ -50,12 +50,14 @@ class PatientContext:
     def __init__(
         self,
         df: pd.DataFrame,
-        patient_id: str = "559",
+        patient_id: str = "Uploaded patient",
         forecast_context: Optional[dict[str, Any]] = None,
+        patient_dataset: Optional[pd.DataFrame] = None,
     ):
         self.patient_id = patient_id
         self.forecast_context: dict[str, Any] = forecast_context or {}
         self.df = df.sort_values("timestamp").reset_index(drop=True)
+        self.patient_dataset = (patient_dataset if patient_dataset is not None else self.df).copy(deep=True)
         self.feature_df = build_features_single(self.df.copy())
         self.last_row = self.feature_df.iloc[-1]
         self.latest_glucose = float(self.last_row["glucose"])
@@ -66,8 +68,9 @@ class PatientContext:
     def from_readings(
         cls,
         readings: list[dict[str, Any]],
-        patient_id: str = "custom",
+        patient_id: str = "Uploaded patient",
         forecast_context: Optional[dict[str, Any]] = None,
+        patient_dataset: Optional[pd.DataFrame] = None,
     ) -> "PatientContext":
         """Build context from a list of dicts with 'timestamp' and 'glucose'."""
         if len(readings) < MIN_HISTORY:
@@ -75,19 +78,7 @@ class PatientContext:
         df = pd.DataFrame(readings)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df["glucose"] = df["glucose"].astype(float)
-        return cls(df, patient_id=patient_id, forecast_context=forecast_context)
-
-    @classmethod
-    def default(cls, forecast_context: Optional[dict[str, Any]] = None) -> "PatientContext":
-        """Generate default synthetic Ohio test case (48 readings at 5-minute spacing)."""
-        base_time = datetime(2020, 3, 15, 8, 0, 0)
-        readings = []
-        for i in range(48):
-            ts = base_time + timedelta(minutes=5 * i)
-            # Oscillates around 130 mg/dL with realistic slight trend
-            val = 135.0 + 12.0 * np.sin(i / 4.0) + (i % 5) * 1.5
-            readings.append({"timestamp": ts.isoformat(), "glucose": round(val, 1)})
-        return cls.from_readings(readings, patient_id="559", forecast_context=forecast_context)
+        return cls(df, patient_id=patient_id, forecast_context=forecast_context, patient_dataset=patient_dataset)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +135,25 @@ class ExplainForecastInput(BaseModel):
         return v
 
 
+class PatientDatasetQueryInput(BaseModel):
+    column: Optional[str] = Field(default=None, description="A measurement column from the uploaded patient dataset.")
+    operation: str = Field(default="value", description="One of value, mean, min, max, median, std, sum, count, mode, unique, rows, or columns.")
+    timestamp: Optional[str] = Field(default=None, description="A time to look up; the nearest recorded sample is returned.")
+    start_time: Optional[str] = Field(default=None, description="Optional inclusive start of a time range.")
+    end_time: Optional[str] = Field(default=None, description="Optional inclusive end of a time range.")
+    limit: int = Field(default=20, ge=1, le=100, description="Maximum rows to return for a rows query.")
+    offset: int = Field(default=0, ge=0, le=1000000, description="Zero-based row offset for paging through a rows query.")
+
+    @field_validator("operation")
+    @classmethod
+    def validate_operation(cls, value: str) -> str:
+        allowed = {"value", "mean", "min", "max", "median", "std", "sum", "count", "mode", "unique", "rows", "columns"}
+        normalized = value.strip().lower()
+        if normalized not in allowed:
+            raise ValueError(f"operation must be one of {sorted(allowed)}")
+        return normalized
+
+
 # ---------------------------------------------------------------------------
 # Tool Implementations
 # ---------------------------------------------------------------------------
@@ -173,6 +183,11 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
         pred_val = round(float(item.get("predicted", item.get("predicted_glucose", 0.0))), 1)
         cur_val = round(float(fc.get("current_glucose", context.latest_glucose)), 1)
         change_val = round(float(item.get("change", item.get("change_from_latest", pred_val - cur_val))), 1)
+        origin_timestamp = str(fc.get("timestamp", context.latest_timestamp))
+        try:
+            forecast_timestamp = (pd.Timestamp(origin_timestamp) + pd.Timedelta(minutes=hz)).isoformat()
+        except (TypeError, ValueError):
+            forecast_timestamp = None
         zone = item.get("zone", item.get("zone_label"))
         if not zone or zone in ("low", "high"):
             if pred_val < 54:
@@ -192,7 +207,9 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
             "current_glucose_mg_dl": cur_val,
             "change_mg_dl": change_val,
             "zone": zone,
-            "timestamp": str(fc.get("timestamp", context.latest_timestamp)),
+            "timestamp": forecast_timestamp or origin_timestamp,
+            "forecast_origin_timestamp": origin_timestamp,
+            "forecast_for_timestamp": forecast_timestamp,
             "patient_id": str(fc.get("patient_id", context.patient_id)),
             "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
             "source": fc.get("source", "pipeline"),
@@ -205,33 +222,15 @@ def tool_get_forecast(args: dict[str, Any], context: PatientContext, store: Mode
             res["clarke_zone"] = item["clarke_zone"]
         return res
 
-    # Fallback to direct model evaluation via store
-    if not store.is_loaded(hz):
-        store.load(hz)
-    pred = store.predict(context.features_dict, hz)
-    pred_val = round(float(pred), 1)
-    change = round(pred_val - context.latest_glucose, 1)
-
-    if pred_val < 54:
-        zone = "severe_hypoglycemia"
-    elif pred_val < 70:
-        zone = "hypoglycemia"
-    elif pred_val > 250:
-        zone = "severe_hyperglycemia"
-    elif pred_val > 180:
-        zone = "hyperglycemia"
-    else:
-        zone = "in_range"
-
     return {
+        "status": "horizon_unavailable",
+        "has_forecast": False,
         "horizon_min": hz,
-        "predicted_glucose_mg_dl": pred_val,
-        "current_glucose_mg_dl": round(context.latest_glucose, 1),
-        "change_mg_dl": change,
-        "zone": zone,
-        "timestamp": context.latest_timestamp,
-        "patient_id": context.patient_id,
-        "selected_patient_id": str(fc.get("selected_patient_id", context.patient_id)),
+        "available_horizons": sorted(int(value) for value in preds) if isinstance(preds, dict) else [],
+        "message": (
+            f"No uploaded forecast is available for {hz} minutes. Do not calculate or estimate one. "
+            "Tell the user which horizons are available and ask them to select the requested horizon or all horizons in CSV upload, then upload and predict again."
+        ),
     }
 
 
@@ -251,8 +250,20 @@ def tool_get_all_forecasts(args: dict[str, Any], context: PatientContext, store:
             "forecasts": [],
         }
 
+    available = fc.get("predictions")
+    if not isinstance(available, dict) or not available:
+        return {
+            "status": "no_forecast_available",
+            "has_forecast": False,
+            "patient_id": pt_id,
+            "current_glucose_mg_dl": cur_val,
+            "forecasts": [],
+            "message": "No uploaded forecast values are available. Do not calculate or estimate glucose predictions.",
+        }
     results = []
     for hz in HORIZONS:
+        if str(hz) not in available and hz not in available:
+            continue
         res = tool_get_forecast({"horizon_min": hz}, context, store)
         results.append(res)
     return {
@@ -477,6 +488,167 @@ def tool_explain_forecast(args: dict[str, Any], context: PatientContext, store: 
     }
 
 
+def _json_value(value: Any) -> Any:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _measurement_unit(column: str) -> str | None:
+    if column in {"glucose", "cgm", "bg", "blood_glucose", "blood_glucose_mg_dl", "glucose_mg_dl"}:
+        return "mg/dL"
+    if column in {"hr", "heart_rate", "heartrate", "heart_rate_bpm", "pulse", "pulse_rate"}:
+        return "bpm"
+    return None
+
+
+def tool_query_patient_dataset(args: dict[str, Any], context: PatientContext, store: ModelStore) -> dict[str, Any]:
+    """Query only the measurements from the active uploaded patient dataset."""
+    query = PatientDatasetQueryInput(**args)
+    frame = getattr(context, "patient_dataset", None)
+    if frame is None or frame.empty:
+        return {"status": "no_patient_dataset", "message": "No uploaded patient dataset is available in this conversation."}
+
+    columns = [column for column in frame.columns if column != "timestamp"]
+    if query.operation == "columns":
+        return {
+            "status": "ok",
+            "record_count": len(frame),
+            "time_start": _json_value(frame["timestamp"].min()),
+            "time_end": _json_value(frame["timestamp"].max()),
+            "measurement_columns": columns,
+        }
+
+    requested = normalize_column_name(query.column) if query.column else None
+    aliases = {
+        "hr": {"hr", "heart_rate", "heartrate", "heart_rate_bpm", "pulse", "pulse_rate"},
+        "heart_rate": {"hr", "heart_rate", "heartrate", "heart_rate_bpm", "pulse", "pulse_rate"},
+        "heartrate": {"hr", "heart_rate", "heartrate", "heart_rate_bpm", "pulse", "pulse_rate"},
+        "glucose": {"glucose", "cgm", "bg", "blood_glucose", "blood_glucose_mg_dl", "glucose_mg_dl"},
+        "cgm": {"glucose", "cgm", "bg", "blood_glucose", "blood_glucose_mg_dl", "glucose_mg_dl"},
+    }
+    matches = aliases.get(requested or "", {requested}) if requested else set()
+    column = next((candidate for candidate in columns if candidate == requested or candidate in matches), None)
+    if query.operation == "rows" and not requested:
+        selected_columns = ["timestamp", *columns]
+    elif column is None:
+        return {
+            "status": "measurement_not_found" if requested else "column_required",
+            "requested_column": requested,
+            "available_measurements": columns,
+            "message": "Choose a measurement from this uploaded patient dataset. No other data sources are available.",
+        }
+    else:
+        selected_columns = ["timestamp", column]
+
+    selected = frame.copy()
+    try:
+        if query.start_time:
+            selected = selected[selected["timestamp"] >= pd.to_datetime(query.start_time, utc=True)]
+        if query.end_time:
+            selected = selected[selected["timestamp"] <= pd.to_datetime(query.end_time, utc=True)]
+    except (ValueError, TypeError) as exc:
+        return {"status": "invalid_time", "message": f"Could not parse the requested time range: {exc}"}
+
+    if selected.empty:
+        return {"status": "no_matching_records", "measurement": column, "record_count": 0}
+
+    if query.operation == "value":
+        if not column:
+            return {"status": "column_required", "available_measurements": columns}
+        if query.timestamp:
+            try:
+                target = pd.to_datetime(query.timestamp, utc=True)
+            except (ValueError, TypeError) as exc:
+                return {"status": "invalid_time", "message": f"Could not parse the requested timestamp: {exc}"}
+            distances = (selected["timestamp"] - target).abs()
+            row = selected.loc[distances.idxmin()]
+            offset = abs((row["timestamp"] - target).total_seconds()) / 60
+            return {
+                "status": "ok",
+                "measurement": column,
+                "requested_timestamp": target.isoformat(),
+                "recorded_timestamp": _json_value(row["timestamp"]),
+                "minutes_from_requested_time": round(offset, 2),
+                "value": _json_value(row[column]),
+                "unit": _measurement_unit(column),
+            }
+        row = selected.iloc[-1]
+        return {
+            "status": "ok",
+            "measurement": column,
+            "recorded_timestamp": _json_value(row["timestamp"]),
+            "value": _json_value(row[column]),
+            "unit": _measurement_unit(column),
+        }
+
+    if query.operation == "rows":
+        rows = selected[selected_columns].iloc[query.offset:query.offset + query.limit].to_dict(orient="records")
+        return {
+            "status": "ok",
+            "record_count": len(selected),
+            "returned_count": len(rows),
+            "offset": query.offset,
+            "has_more": query.offset + len(rows) < len(selected),
+            "rows": [{key: _json_value(value) for key, value in row.items()} for row in rows],
+        }
+
+    if not column:
+        return {"status": "column_required", "available_measurements": columns}
+    if query.operation == "count":
+        count = int(selected[column].count())
+        return {
+            "status": "ok", "measurement": column, "operation": "count", "value": count,
+            "record_count": count, "start_time": _json_value(selected["timestamp"].min()),
+            "end_time": _json_value(selected["timestamp"].max()), "unit": None,
+        }
+    if query.operation == "mode":
+        modes = selected[column].dropna().mode()
+        if modes.empty:
+            return {"status": "no_values", "measurement": column}
+        mode_value = _json_value(modes.iloc[0])
+        frequency = int(selected[column].eq(modes.iloc[0]).sum())
+        return {"status": "ok", "measurement": column, "operation": "mode", "value": mode_value, "frequency": frequency}
+    if query.operation == "unique":
+        unique_values = [_json_value(value) for value in pd.unique(selected[column].dropna())]
+        return {
+            "status": "ok", "measurement": column, "operation": "unique",
+            "distinct_count": len(unique_values), "unique_values": unique_values[:50],
+            "truncated": len(unique_values) > 50,
+        }
+    values = pd.to_numeric(selected[column], errors="coerce").dropna()
+    if values.empty:
+        return {"status": "no_numeric_values", "measurement": column}
+    result = {
+        "mean": values.mean,
+        "min": values.min,
+        "max": values.max,
+        "median": values.median,
+        "std": lambda: values.std(ddof=0),
+        "sum": values.sum,
+        "count": values.count,
+    }[query.operation]()
+    aggregate: dict[str, Any] = {
+        "status": "ok",
+        "measurement": column,
+        "operation": query.operation,
+        "value": round(float(result), 4),
+        "record_count": int(values.count()),
+        "start_time": _json_value(selected["timestamp"].min()),
+        "end_time": _json_value(selected["timestamp"].max()),
+        "unit": _measurement_unit(column),
+    }
+    if query.operation in {"min", "max"}:
+        numeric_values = pd.to_numeric(selected[column], errors="coerce")
+        extreme_index = numeric_values.idxmin() if query.operation == "min" else numeric_values.idxmax()
+        aggregate["value_timestamp"] = _json_value(selected.loc[extreme_index, "timestamp"])
+    return aggregate
+
+
 # ---------------------------------------------------------------------------
 # Tool Declarations (Groq JSON Schema)
 # ---------------------------------------------------------------------------
@@ -486,7 +658,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_forecast",
-            "description": "Run the calibrated XGBoost model to get blood glucose forecast for a specific horizon (30, 60, 90, or 120 minutes).",
+            "description": "Retrieve an already generated prediction for the active uploaded patient at a specific horizon. Never generate or estimate a forecast. Only horizons available in the active upload context can be returned.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -504,7 +676,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_all_forecasts",
-            "description": "Run and return future blood glucose predictions for all 4 horizons (30, 60, 90, and 120 minutes) simultaneously.",
+            "description": "Retrieve only the already generated predictions available in the active uploaded patient context. Do not generate missing horizons.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -575,13 +747,42 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
 ]
 
+TOOL_DEFINITIONS = [
+    definition for definition in TOOL_DEFINITIONS
+    if definition["function"]["name"] not in {"get_model_performance", "explain_forecast"}
+]
+TOOL_DEFINITIONS.append({
+    "type": "function",
+    "function": {
+        "name": "query_patient_dataset",
+        "description": (
+            "Answer questions about measurements and timestamps in the active uploaded patient dataset only. "
+            "Use operation=columns to inspect available measurements; value for a measurement at a time; "
+            "mean/min/max/median/std/sum/count/mode/unique for a time range; or rows to page through all records with limit and offset. "
+            "Never use other patients, demo data, code, project files, or outside datasets."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "column": {"type": "string", "description": "Measurement column, such as heart_rate, insulin, cgm, or glucose."},
+                "operation": {"type": "string", "enum": ["value", "mean", "min", "max", "median", "std", "sum", "count", "mode", "unique", "rows", "columns"]},
+                "timestamp": {"type": "string", "description": "Point in time for a nearest-reading lookup."},
+                "start_time": {"type": "string", "description": "Inclusive time-range start."},
+                "end_time": {"type": "string", "description": "Inclusive time-range end."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum number of rows to return."},
+                "offset": {"type": "integer", "minimum": 0, "maximum": 1000000, "description": "Zero-based offset for paging through rows."},
+            },
+        },
+    },
+})
+
+
 TOOL_ROUTER = {
     "get_forecast": tool_get_forecast,
     "get_all_forecasts": tool_get_all_forecasts,
     "get_recent_glucose": tool_get_recent_glucose,
     "assess_risk": tool_assess_risk,
-    "get_model_performance": tool_get_model_performance,
-    "explain_forecast": tool_explain_forecast,
+    "query_patient_dataset": tool_query_patient_dataset,
 }
 
 

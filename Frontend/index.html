@@ -4,9 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Glucose Horizon — CGM-Only Blood Glucose Forecasting</title>
+  <link rel="icon" type="image/svg+xml" href="glucose-horizon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.453.0/dist/umd/lucide.min.js"></script>
@@ -221,6 +222,11 @@
         <div class="card" id="patientRangeCard">
           <h2>Patient glucose range</h2>
           <div id="range" class="range-wrap"></div>
+          <div class="range-legend" role="group" aria-label="Glucose range thresholds">
+            <span><i aria-hidden="true"></i>Below range: under 70 mg/dL</span>
+            <span><i aria-hidden="true"></i>In range: 70–180 mg/dL</span>
+            <span><i aria-hidden="true"></i>Above range: over 180 mg/dL</span>
+          </div>
           <p id="rangeNote" class="muted"></p>
         </div>
 
@@ -238,14 +244,20 @@
         <div class="two">
           <div class="card" id="clarkePlotCard" hidden>
             <h2>Clarke Error Grid</h2>
-            <div class="chart sq"><canvas id="cClarke" aria-label="Clarke Error Grid scatter chart"></canvas></div>
+            <div class="ega-plot-layout">
+              <div class="chart sq"><canvas id="cClarke" aria-label="Clarke Error Grid scatter chart"></canvas></div>
+            </div>
           </div>
           <div class="card" id="clarkeZonesCard" hidden>
             <h2>Zone distribution</h2>
             <div id="zones"></div>
+            <label id="uploadEgaHorizonControl" hidden>Upload EGA horizon
+              <select id="uploadEgaHorizon" aria-label="Choose upload EGA horizon"><option value="30">30 min</option><option value="60">60 min</option><option value="90">90 min</option><option value="120">120 min</option></select>
+            </label>
+            <p class="muted ega-zone-key"><strong>Zone guide:</strong> A and B are generally clinically acceptable. C, D, and E fall outside those regions and need closer review.</p>
             <p id="clarkeNote" class="muted">
               Zones A and B are generally treated as clinically acceptable in the literature.
-              Patient-specific held-out points are shown; the selected forecast is outlined in cyan.
+              Patient-specific held-out points are shown; the selected forecast is outlined for clarity.
             </p>
           </div>
         </div>
@@ -365,6 +377,10 @@
             <label>Forecast horizon
               <select id="uploadHorizon" aria-label="Choose forecast horizon">
                 <option value="all">All horizons</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+                <option value="90">90 min</option>
+                <option value="120">120 min</option>
               </select>
             </label>
             <button type="button" class="btn primary upload-submit" id="uploadRun">
@@ -396,7 +412,7 @@
       <section id="v-agent" class="view" aria-labelledby="agent-title" hidden>
         <header class="view-header">
           <h1 id="agent-title">T1D Forecasting &amp; Wellness Agent</h1>
-          <p>Powered by Groq and <code>openai/gpt-oss-120b</code>, the assistant answers questions about your glucose forecast using calibrated XGBoost models. It can also suggest balanced meals, workout routines, and immediate steps for hypo- and hyperglycemia.</p>
+          <p>The Forecast Agent can use glucose context only from a successfully uploaded patient CSV. Until a CSV is uploaded, patient context cannot be determined and the agent is unavailable.</p>
         </header>
 
         <div class="agent-layout">
@@ -430,28 +446,28 @@
               </div>
             </div>
 
+            <div id="agentContextStatus" class="agent-context-status" role="status" aria-live="polite">
+              <i data-lucide="info" aria-hidden="true"></i>
+              <span><strong>No upload done yet.</strong> Patient context cannot be determined. Upload a patient CSV to enable the agent.</span>
+            </div>
+
             <!-- Messages Thread -->
             <div class="agent-thread" id="agentThread" role="log" aria-live="polite">
               <div class="agent-msg assistant">
                 <div class="msg-avatar"><i data-lucide="bot"></i></div>
                 <div class="msg-content">
                   <div class="msg-body">
-                    <p>Hello! I am your <strong>T1D Forecasting &amp; Wellness Assistant</strong>, powered by Groq (<code>openai/gpt-oss-120b</code>) and your calibrated OhioT1DM XGBoost models.</p>
-                    <p>I can analyze your blood glucose trajectory across 30, 60, 90, and 120-minute horizons, and provide rich, in-depth guidance on:</p>
+                    <p><strong>👋 Hello! I’m your T1D Forecasting &amp; Wellness Assistant.</strong> I’m here to make your glucose data easier to understand and help you explore your forecast.</p>
+                    <p>Once patient data is uploaded, I can help with:</p>
                     <ul>
-                      <li><strong>🥗 Meal Data &amp; Nutrition Strategy:</strong> Low-GI carbohydrate pacing, protein/fiber pairing, and practical meal plans to keep glucose in range.</li>
-                      <li><strong>🏃 Workout &amp; Physical Activity Routines:</strong> Safe aerobic and resistance routines, pre-workout checks, and exercise pacing for steady glucose.</li>
-                      <li><strong>⚡ Immediate Hypo Triage (&lt;70 or &lt;54 mg/dL):</strong> Step-by-step <em>Rule of 15</em> fast-acting carb recovery and critical severe hypo protocols.</li>
-                      <li><strong>💧 Immediate Hyper Triage (&gt;180 or &gt;250 mg/dL):</strong> Aggressive hydration, ketone testing protocols, and exercise safety warnings.</li>
+                      <li>📊 <strong>Your readings:</strong> Look up glucose and other recorded measurements at specific times, and spot trends together.</li>
+                      <li>🔮 <strong>Your forecast:</strong> Explore predictions at 30, 60, 90, and 120 minutes and what they mean.</li>
+                      <li>🥗 <strong>Meals &amp; nutrition:</strong> Find general meal ideas and simple ways to balance a plate.</li>
+                      <li>🏃 <strong>Movement:</strong> Get practical, general activity ideas.</li>
+                      <li>💧 <strong>Low or high readings:</strong> Review general safety information and when to follow your care plan or contact your care team.</li>
                     </ul>
-                    <div class="agent-welcome-disclaimer" id="agentWelcomeDisclaimer">
-                      <div class="disclaimer-header">
-                        <i data-lucide="shield-check"></i>
-                        <strong>Clinical Research Disclaimer</strong>
-                      </div>
-                      <p>This is an investigational decision-support research prototype calibrated on OhioT1DM patient data. Predictions are strictly CGM-based (no insulin or meal data). It does not provide medical advice, diagnosis, or insulin dosing recommendations. Always consult your diabetes care team before altering your care plan.</p>
-                    </div>
-                    <p><em>Every number I state is strictly grounded in real model tool runs. Ask any question below to get started!</em></p>
+                    <div class="agent-welcome-disclaimer"><strong>Research prototype:</strong> Responses use uploaded patient information only for patient-specific answers. This is not medical advice, diagnosis, or insulin-dosing guidance. Follow your care plan and consult your clinician.</div>
+                    <p><em>✨ Patient-specific answers are available after you upload a CSV. Without an upload, patient context can’t be determined—no demo or test-patient data is used.</em></p>
                   </div>
                 </div>
               </div>

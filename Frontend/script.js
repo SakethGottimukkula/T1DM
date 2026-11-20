@@ -7,7 +7,7 @@
    predicted, actual, horizon, error, clarke_zone, and context.
    ============================================================================= */
 
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = 'https://t1dm-x8ec.onrender.com';
 
 const ENDPOINTS = {
   health: '/health',
@@ -37,30 +37,30 @@ const ZONE_SHARE = {
 };
 
 const COLORS = {
-  accent: '#22d3ee',
-  blue: '#60a5fa',
-  ok: '#34d399',
-  warn: '#fbbf24',
-  bad: '#f87171',
-  mute: '#8fa3b8',
-  grid: 'rgba(148, 183, 210, 0.14)',
-  text: '#e8eef6',
+  accent: '#E5573B',
+  blue: '#1F2A44',
+  ok: '#285C95',
+  warn: '#946000',
+  bad: '#D64545',
+  mute: '#6B7391',
+  grid: 'rgba(31, 42, 68, 0.10)',
+  text: '#1F2A44',
 };
 
 const ZONE_COLORS = {
-  A: COLORS.ok,
-  B: COLORS.accent,
-  C: COLORS.warn,
-  D: '#fb923c',
-  E: COLORS.bad,
+  A: '#4DA3E0',
+  B: '#F6D98D',
+  C: '#F5B83D',
+  D: '#ED824B',
+  E: '#D64545',
 };
 
 const ZONE_RGBA = {
-  A: [52, 211, 153, 78],
-  B: [34, 211, 238, 42],
-  C: [251, 191, 36, 70],
-  D: [251, 146, 60, 78],
-  E: [248, 113, 113, 88],
+  A: [77, 163, 224, 45],
+  B: [219, 231, 239, 55],
+  C: [245, 184, 61, 58],
+  D: [237, 130, 75, 54],
+  E: [214, 69, 69, 48],
 };
 
 const LOAD_STEPS = [
@@ -144,6 +144,14 @@ function esc(value) {
   }[ch]));
 }
 
+function hasUploadedPatientContext() {
+  return Boolean(
+    state.lastUploadForecast?.agent_dataset_id &&
+    state.lastUploadForecast?.predictions?.length &&
+    state.lastUploadForecast?.readings?.length >= 24
+  );
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -181,13 +189,16 @@ function initCursorDots() {
           if (distance >= radius) continue;
           const fade = 1 - distance / radius;
           ctx.globalAlpha = pointer.opacity * fade * fade * 0.56;
-          ctx.fillStyle = '#38eaff';
+          ctx.fillStyle = '#1F426B';
+          ctx.shadowColor = 'rgba(31, 66, 107, 0.52)';
+          ctx.shadowBlur = 7;
           ctx.beginPath();
           ctx.arc(x, y, 1.15, 0, Math.PI * 2);
           ctx.fill();
         }
       }
     }
+    ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
     if (pointer.opacity > 0.005 || pointer.targetOpacity > 0) frame = requestAnimationFrame(draw);
     else frame = 0;
@@ -566,7 +577,8 @@ function getActiveForecastContext() {
     const predsMap = {};
     const latestGlucose = upload.latest_glucose ?? null;
     const timestamp = upload.timestamp || null;
-    upload.predictions.forEach((p) => {
+    const agentPredictions = upload.agent_predictions || upload.predictions;
+    agentPredictions.forEach((p) => {
       predsMap[p.horizon] = {
         predicted: p.predicted_glucose,
         change: p.change_from_latest,
@@ -775,22 +787,21 @@ const api = {
   },
 
   async agentChat(message, sessionId = 'default') {
+    const upload = state.lastUploadForecast;
+    if (!hasUploadedPatientContext()) {
+      throw new Error('No patient upload has been completed. Patient context cannot be determined yet.');
+    }
     const forecastContext = getActiveForecastContext();
-    const sample = currentSample();
-    const readings = forecastContext?.context_readings?.length
-      ? forecastContext.context_readings
-      : (forecastContext?.source === 'upload' && state.lastUploadForecast?.readings?.length)
-        ? state.lastUploadForecast.readings
-        : readingsFor(sample);
-    const patientId = forecastContext?.selected_patient_id || forecastContext?.patient_id || String(sample.patient);
+    if (forecastContext?.source !== 'upload') {
+      throw new Error('Uploaded patient context is unavailable. Please upload a patient CSV first.');
+    }
     const response = await fetch(`${API_BASE_URL}${ENDPOINTS.agentChat}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId,
         message,
-        patient_id: patientId,
-        readings,
+        agent_dataset_id: upload.agent_dataset_id,
         forecast_context: forecastContext,
       }),
     });
@@ -954,11 +965,12 @@ function renderStatus() {
 
 function configureChartDefaults() {
   if (typeof Chart === 'undefined') return;
-  Chart.defaults.font.family = '"IBM Plex Sans", system-ui, sans-serif';
+  Chart.defaults.font.family = '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  Chart.defaults.font.size = 12;
   Chart.defaults.color = COLORS.mute;
   Chart.defaults.borderColor = COLORS.grid;
-  Chart.defaults.plugins.tooltip.backgroundColor = '#101a2c';
-  Chart.defaults.plugins.tooltip.borderColor = 'rgba(148, 183, 210, 0.24)';
+  Chart.defaults.plugins.tooltip.backgroundColor = getComputedStyle(document.documentElement).getPropertyValue('--bg-elevated').trim();
+  Chart.defaults.plugins.tooltip.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--line-strong').trim();
   Chart.defaults.plugins.tooltip.borderWidth = 1;
   Chart.defaults.plugins.tooltip.titleColor = COLORS.text;
   Chart.defaults.plugins.tooltip.bodyColor = COLORS.text;
@@ -972,9 +984,9 @@ const rangeBandPlugin = {
     const top = scales.y.getPixelForValue(180);
     const bottom = scales.y.getPixelForValue(70);
     ctx.save();
-    ctx.fillStyle = 'rgba(52, 211, 153, 0.10)';
+    ctx.fillStyle = 'rgba(77, 163, 224, 0.12)';
     ctx.fillRect(chartArea.left, top, chartArea.right - chartArea.left, bottom - top);
-    ctx.strokeStyle = 'rgba(52, 211, 153, 0.35)';
+    ctx.strokeStyle = 'rgba(77, 163, 224, 0.32)';
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
     ctx.moveTo(chartArea.left, top);
@@ -993,8 +1005,6 @@ const nowPlugin = {
     if (!chartArea || !scales.x) return;
     const xNow = scales.x.getPixelForValue(0);
     ctx.save();
-    ctx.fillStyle = 'rgba(34, 211, 238, 0.06)';
-    ctx.fillRect(xNow, chartArea.top, chartArea.right - xNow, chartArea.bottom - chartArea.top);
     ctx.strokeStyle = COLORS.mute;
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
@@ -1003,7 +1013,7 @@ const nowPlugin = {
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = COLORS.mute;
-    ctx.font = '11px "IBM Plex Sans", sans-serif';
+    ctx.font = '11px "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.fillText('History', chartArea.left + 6, chartArea.top + 14);
     ctx.fillText('Now', xNow + 6, chartArea.top + 14);
     ctx.fillText('Future', chartArea.right - 48, chartArea.top + 14);
@@ -1013,12 +1023,13 @@ const nowPlugin = {
 
 function axis(title) {
   return {
-    grid: { color: COLORS.grid },
-    ticks: { color: COLORS.mute },
+    grid: { color: COLORS.grid, lineWidth: 0.6 },
+    ticks: { color: COLORS.mute, font: { size: 11 } },
     title: {
       display: Boolean(title),
       text: title,
       color: COLORS.mute,
+      font: { size: 12, weight: '500' },
     },
   };
 }
@@ -1031,27 +1042,27 @@ function trajectoryConfig() {
       datasets: [
         {
           label: 'Historical glucose',
-          borderColor: COLORS.blue,
-          backgroundColor: COLORS.blue,
-          borderWidth: 2,
+          borderColor: '#1F2A44',
+          backgroundColor: '#1F2A44',
+          borderWidth: 1.8,
           pointRadius: 0,
           tension: 0.3,
           data: [],
         },
         {
           label: 'Actual future (held out)',
-          borderColor: COLORS.ok,
-          backgroundColor: COLORS.ok,
-          borderWidth: 2,
+          borderColor: '#4DA3E0',
+          backgroundColor: '#4DA3E0',
+          borderWidth: 1.8,
           pointRadius: 0,
           tension: 0.3,
           data: [],
         },
         {
           label: 'Forecast',
-          borderColor: COLORS.accent,
-          backgroundColor: COLORS.accent,
-          borderWidth: 2,
+          borderColor: '#24697C',
+          backgroundColor: '#24697C',
+          borderWidth: 1.8,
           borderDash: [6, 4],
           pointRadius: 4,
           pointHoverRadius: 6,
@@ -1080,7 +1091,7 @@ function trajectoryConfig() {
         },
       },
       plugins: {
-        legend: { labels: { color: COLORS.mute, boxWidth: 12, usePointStyle: true } },
+        legend: { labels: { color: COLORS.mute, boxWidth: 10, usePointStyle: true, font: { size: 11 } } },
         tooltip: {
           callbacks: {
             label(context) {
@@ -1115,7 +1126,9 @@ function setTrajectory(id, opts = {}) {
   const sample = opts.sample || currentSample();
   if (!chart || !sample) return;
 
-  const ready = opts.ready ?? (sample === currentSample() && hasForecast());
+  // Upload samples are reconstructed on each lookup, so compare their stable ID
+  // rather than object identity before deciding whether to show the forecast.
+  const ready = opts.ready ?? (sample.id === currentSample().id && hasForecast());
   const horizons = ready ? (opts.horizons || horizonsFor(sample.id)) : null;
   const visible = ready ? sample.series : sample.series.filter((point) => point.x <= 0);
   const values = visible.map((point) => point.y)
@@ -1138,8 +1151,8 @@ function setTrajectory(id, opts = {}) {
     return HZ[context.dataIndex - 1] === state.horizon ? 7 : 3;
   };
   chart.data.datasets[2].pointBackgroundColor = (context) => {
-    if (context.dataIndex === 0) return COLORS.accent;
-    return HZ[context.dataIndex - 1] === state.horizon ? COLORS.accent : 'rgba(34, 211, 238, 0.45)';
+    if (context.dataIndex === 0) return '#24697C';
+    return HZ[context.dataIndex - 1] === state.horizon ? '#24697C' : 'rgba(31, 42, 68, 0.52)';
   };
 
   const duration = reduceMotion ? 0 : opts.draw ? (opts.animate ? 1400 : 700) : 0;
@@ -1190,8 +1203,8 @@ const clarkePlugin = {
     const { ctx, chartArea, scales } = chart;
     if (!chartArea) return;
     ctx.save();
-    ctx.font = '600 13px "IBM Plex Sans", sans-serif';
-    ctx.fillStyle = 'rgba(232, 238, 246, 0.92)';
+    ctx.font = '600 12px "Inter", -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = '#1F2A44';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     [
@@ -1234,7 +1247,7 @@ function ensureClarke() {
           data: CLARKE_POINTS,
           pointRadius: 3,
           pointHoverRadius: 5,
-          pointBackgroundColor: CLARKE_POINTS.map((point) => ZONE_COLORS[point.z]),
+          pointBackgroundColor: '#1F2A44',
           pointBorderWidth: 0,
         },
         {
@@ -1282,8 +1295,8 @@ function ensureErrorChart() {
           type: 'bar',
           label: `Patient ${state.patient} RMSE (mg/dL)`,
           data: HZ.map((horizon) => patientRmse(state.patient, horizon)),
-          backgroundColor: 'rgba(34, 211, 238, 0.55)',
-          borderColor: COLORS.accent,
+          backgroundColor: ['#4DA3E0', '#B8D9EE', '#F5B83D', '#E5573B'],
+          borderColor: ['#4DA3E0', '#B8D9EE', '#F5B83D', '#E5573B'],
           borderWidth: 1,
           borderRadius: 6,
           yAxisID: 'y',
@@ -1309,8 +1322,8 @@ function ensureUploadBacktestChart() {
   return ensureChart('cUploadBacktest', (canvas) => new Chart(canvas, {
     type: 'scatter',
     data: { datasets: [
-      { label: 'Uploaded patient readings', data: [], borderColor: COLORS.accent, backgroundColor: 'rgba(34,211,238,.5)', pointRadius: 3, pointHoverRadius: 5 },
-      { label: 'Perfect agreement', data: [{ x: 40, y: 40 }, { x: 400, y: 400 }], type: 'line', borderColor: 'rgba(143,163,184,.55)', borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5 },
+      { label: 'Uploaded patient readings', data: [], borderColor: '#1F2A44', backgroundColor: '#1F2A44', pointRadius: 3, pointHoverRadius: 5 },
+      { label: 'Perfect agreement', data: [{ x: 40, y: 40 }, { x: 400, y: 400 }], type: 'line', borderColor: 'rgba(31,42,68,.38)', borderDash: [6, 5], pointRadius: 0, borderWidth: 1.2 },
     ] },
     options: { responsive: true, maintainAspectRatio: false, aspectRatio: 1,
       plugins: { legend: { labels: { color: COLORS.mute } }, tooltip: { callbacks: { label: (context) => {
@@ -1702,6 +1715,10 @@ function renderClinical() {
   const referenceValue = $('#referencePatient')?.value || '';
   const [referenceDataset, referencePatient] = referenceValue.split('|');
   if (referenceEnabled && referenceDataset && referencePatient) {
+    const referenceEgaControl = $('#uploadEgaHorizonControl');
+    const referenceEgaSelect = $('#uploadEgaHorizon');
+    if (referenceEgaControl) referenceEgaControl.hidden = false;
+    if (referenceEgaSelect) referenceEgaSelect.value = String(state.horizon);
     $('#clarkePlotCard').hidden = false;
     $('#clarkeZonesCard').hidden = false;
     const simReference = referenceDataset === 'sim' ? simReferenceCache.get(referencePatient) : null;
@@ -1732,7 +1749,7 @@ function renderClinical() {
       if (chart) {
         chart.data.datasets[0].label = `${referenceDataset === 'sim' ? 'SimGlucose' : 'OhioT1DM'} reference patient ${referencePatient}`;
         chart.data.datasets[0].data = reference?.points || [];
-        chart.data.datasets[0].pointBackgroundColor = (reference?.points || []).map((point) => ZONE_COLORS[point.z]);
+        chart.data.datasets[0].pointBackgroundColor = '#1F2A44';
         chart.data.datasets[1].data = [];
         chart.update(reduceMotion ? 'none' : undefined);
       }
@@ -1741,7 +1758,14 @@ function renderClinical() {
     if (referenceDataset === 'sim' && !simReference && !simReferenceLoading.has(referencePatient) && !simReferenceFailed.has(referencePatient)) loadSimReference(referencePatient);
     return;
   }
+  const inactiveEgaControl = $('#uploadEgaHorizonControl');
+  if (inactiveEgaControl) inactiveEgaControl.hidden = true;
   if (sample.isUpload) {
+    const uploadEgaControl = $('#uploadEgaHorizonControl');
+    const uploadEgaSelect = $('#uploadEgaHorizon');
+    const allUploadHorizons = state.lastUploadForecast.requested_horizon === 'all';
+    if (uploadEgaControl) uploadEgaControl.hidden = !allUploadHorizons;
+    if (uploadEgaSelect) uploadEgaSelect.value = String(state.horizon);
     const evaluation = state.lastUploadForecast.evaluation?.[String(state.horizon)];
     $('#clarkePlotCard').hidden = !evaluation;
     $('#clarkeZonesCard').hidden = !evaluation;
@@ -1756,7 +1780,7 @@ function renderClinical() {
       const chart = ensureClarke();
       if (chart) {
         chart.data.datasets[0].data = evaluation?.points || [];
-        chart.data.datasets[0].pointBackgroundColor = (evaluation?.points || []).map((point) => ZONE_COLORS[point.z]);
+        chart.data.datasets[0].pointBackgroundColor = '#1F2A44';
         chart.data.datasets[1].data = [];
         chart.data.datasets[0].label = `Uploaded patient · ${state.horizon} min historical EGA`;
         chart.update(reduceMotion ? 'none' : undefined);
@@ -2122,6 +2146,10 @@ function bindSelects() {
     state.lastUploadForecast = null;
     renderAll({ animate: false, draw: true });
   });
+  $('#uploadEgaHorizon')?.addEventListener('change', (event) => {
+    state.horizon = Number(event.currentTarget.value);
+    renderAll({ animate: false, draw: true });
+  });
 }
 
 function bindChrome() {
@@ -2133,9 +2161,9 @@ function bindChrome() {
   $('#overviewAgentBtn')?.addEventListener('click', () => {
     showView('agent');
     const input = $('#agentInput');
-    input.value = state.lastUploadForecast
+    input.value = hasUploadedPatientContext()
       ? 'Please explain my uploaded glucose history and forecasts, and suggest safe next steps based on the current readings.'
-      : 'Please explain what information I should consider for my glucose and offer general safe guidance.';
+      : '';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.focus();
   });
@@ -2207,6 +2235,7 @@ function bindChrome() {
     state.lastUploadForecast = null;
     state.lastUploadFileName = $('#uploadCsv').files[0]?.name || '';
     $('#askCsvAgent').disabled = true;
+    document.dispatchEvent(new Event('agent-upload-context-change'));
     renderAll({ animate: false, draw: true });
   });
   $('#uploadRun').addEventListener('click', uploadAndPredict);
@@ -2301,7 +2330,7 @@ function buildSimDashboardSample(data) {
   };
 }
 
-async function loadSimDashboard() {
+async function loadSimDashboard(options = {}) {
   const patient = state.simPatient || $('#simTestPatient').value;
   if (!patient) return;
   state.dataset = 'sim';
@@ -2310,18 +2339,26 @@ async function loadSimDashboard() {
   state.horizon = horizon;
   const caseIndex = $('#simTestCase').value || 2;
   const requestId = ++simDashboardRequestId;
-  $('#simTestResults').innerHTML = '<div class="stat"><small>SimGlucose data</small><b>Loading…</b><span>Updating charts for this virtual patient</span></div>';
+  const simResults = $('#simTestResults');
+  if (!simResults.classList.contains('is-loading')) simResults.innerHTML = '<div class="stat"><small>SimGlucose data</small><b>Loading…</b><span>Updating charts for this virtual patient</span></div>';
   try {
     const response = await fetch(`${API_BASE_URL}${ENDPOINTS.simTestPatient}/${encodeURIComponent(patient)}?horizon=${horizon}&case_index=${caseIndex}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not load SimGlucose patient data');
     if (requestId !== simDashboardRequestId) return;
+    if (options.startedAt !== undefined && options.delayMs) {
+      const remaining = options.delayMs - (performance.now() - options.startedAt);
+      if (remaining > 0) await sleep(remaining);
+      if (requestId !== simDashboardRequestId) return;
+    }
+    simResults.classList.remove('is-loading');
     state.simSample = buildSimDashboardSample(data);
     getActiveForecastContext();
     renderSimTestResults(data);
     renderAll({ animate: true, draw: true });
   } catch (error) {
     if (requestId !== simDashboardRequestId) return;
+    simResults.classList.remove('is-loading');
     $('#simTestResults').innerHTML = `<div class="stat"><small>SimGlucose data</small><b>Unavailable</b><span>${esc(error.message)}</span></div>`;
   }
 }
@@ -2348,6 +2385,7 @@ async function loadSimTestContext() {
 }
 
 function renderSimTestResults(data) {
+  $('#simTestResults').classList.remove('is-loading');
   const horizon = Number($('#simTestHorizon').value || state.horizon);
   const selected = data.predictions[String(horizon)];
   const risk = rangeOf(selected.predicted);
@@ -2381,13 +2419,25 @@ async function runSimTest() {
   const button = $('#runSimTest');
   button.disabled = true;
   button.setAttribute('aria-busy', 'true');
+  const results = $('#simTestResults');
+  results.classList.add('is-loading');
+  results.innerHTML = `<div class="skeleton-grid">${Array.from({ length: 5 }, () => '<div class="skeleton-card" aria-hidden="true"></div>').join('')}</div><div class="loading-status" role="status">${LOAD_STEPS[0]}</div>`;
+  let step = 0;
+  const timer = setInterval(() => {
+    step = Math.min(step + 1, LOAD_STEPS.length - 1);
+    const status = results.querySelector('.loading-status');
+    if (status) status.textContent = LOAD_STEPS[step];
+  }, 480);
   try {
     state.dataset = 'sim';
     state.simPatient = patient;
-    await loadSimDashboard();
+    const startedAt = performance.now();
+    const delayMs = 1500 + Math.random() * 1000;
+    await loadSimDashboard({ startedAt, delayMs });
   } catch (error) {
     $('#simTestResults').innerHTML = `<div class="stat"><small>Evaluation</small><b>Failed</b><span>${esc(error.message)}</span></div>`;
   } finally {
+    clearInterval(timer);
     button.disabled = false;
     button.removeAttribute('aria-busy');
     paintIcons();
@@ -2447,7 +2497,9 @@ async function uploadAndPredict() {
   let requestError;
   try {
     dataProfile = await detectCsvProfile(file);
-    data = await api.predictCsv(file, $('#uploadHorizon').value, multimodal);
+    // Keep all horizon records available to dashboard views; the selected horizon
+    // controls which upload cards are shown and which EGA is selected.
+    data = await api.predictCsv(file, 'all', multimodal);
   } catch (error) {
     requestError = error;
   }
@@ -2455,11 +2507,42 @@ async function uploadAndPredict() {
   if (remaining > 0) await sleep(remaining);
   try {
     if (requestError) throw requestError;
-    state.lastUploadForecast = { ...data, selected_model: multimodal ? 'multimodal' : 'cgm', data_profile: dataProfile };
+    const requestedHorizon = $('#uploadHorizon').value;
+    if (requestedHorizon !== 'all') state.horizon = Number(requestedHorizon);
+    const selectedModel = multimodal ? 'multimodal' : 'cgm';
+    const previousUpload = state.lastUploadForecast;
+    const newAgentPredictions = requestedHorizon === 'all'
+      ? [...(data.predictions || [])]
+      : (data.predictions || []).filter((item) => Number(item.horizon) === Number(requestedHorizon));
+    const samePatientHistory = previousUpload &&
+      previousUpload.row_count === data.row_count &&
+      previousUpload.patient_used === data.patient_used &&
+      previousUpload.timestamp === data.timestamp &&
+      Array.isArray(previousUpload.readings) && Array.isArray(data.readings) &&
+      previousUpload.readings.length === data.readings.length &&
+      previousUpload.readings.every((row, index) => row.timestamp === data.readings[index]?.timestamp && Number(row.glucose) === Number(data.readings[index]?.glucose));
+    const sameForecastFamily = samePatientHistory && previousUpload.selected_model === selectedModel;
+    const mergedAgentPredictions = new Map();
+    if (sameForecastFamily) {
+      (previousUpload.agent_predictions || []).forEach((item) => mergedAgentPredictions.set(Number(item.horizon), item));
+    }
+    newAgentPredictions.forEach((item) => mergedAgentPredictions.set(Number(item.horizon), item));
+    state.lastUploadForecast = {
+      ...data,
+      requested_horizon: requestedHorizon,
+      agent_predictions: [...mergedAgentPredictions.values()],
+      dataset_context_key: samePatientHistory
+        ? previousUpload.dataset_context_key
+        : `patient-data-${Math.random().toString(36).slice(2, 11)}`,
+      selected_model: selectedModel,
+      data_profile: dataProfile,
+      agentContextId: data.agent_dataset_id || '',
+    };
     state.lastUploadFileName = file.name;
-    $('#askCsvAgent').disabled = false;
+    $('#askCsvAgent').disabled = !hasUploadedPatientContext();
     getActiveForecastContext();
-    const predictions = data.predictions || [];
+    document.dispatchEvent(new Event('agent-upload-context-change'));
+    const predictions = (data.predictions || []).filter((item) => requestedHorizon === 'all' || Number(item.horizon) === Number(requestedHorizon));
     const disclaimerBanner = `
       <div class="alert-banner disclaimer-banner" style="grid-column: 1 / -1; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.28); border-radius: 8px;">
         <i data-lucide="shield-alert" style="width: 16px; height: 16px; flex-shrink: 0; color: var(--warn);"></i>
@@ -2879,8 +2962,89 @@ function bindAgentChat() {
   const onlineDot = $('#agentOnlineDot');
   const stickyDisclaimer = $('#agentStickyDisclaimer');
   let suggestionChosen = false;
+  let activeContextId = '';
 
   if (!form) return;
+
+  const introMessage = () => `
+    <div class="agent-msg assistant">
+      <div class="msg-avatar"><i data-lucide="bot" aria-hidden="true"></i></div>
+      <div class="msg-content"><div class="msg-body">
+        <p><strong>👋 Hello! I’m your T1D Forecasting &amp; Wellness Assistant.</strong> I’m here to make your glucose data easier to understand and help you explore your forecast.</p>
+        <p>${hasUploadedPatientContext()
+          ? `This conversation is using <strong>${esc(state.lastUploadFileName || 'your uploaded CSV')}</strong>. No demo or test-patient data is used.`
+          : '<em>No upload has been completed, so patient context cannot be determined. No demo or test-patient data is used.</em>'}</p>
+        <p>With uploaded patient data, I can help with:</p>
+        <ul><li>📊 <strong>Your readings:</strong> Look up glucose and other recorded measurements at specific times, and spot trends together.</li><li>🔮 <strong>Your forecast:</strong> Explore predictions at 30, 60, 90, and 120 minutes and what they mean.</li><li>🥗 <strong>Meals &amp; nutrition:</strong> Find general meal ideas and simple ways to balance a plate.</li><li>🏃 <strong>Movement:</strong> Get practical, general activity ideas.</li><li>💧 <strong>Low or high readings:</strong> Review general safety information and when to follow your care plan or contact your care team.</li></ul>
+        <div class="agent-welcome-disclaimer"><strong>Research prototype:</strong> Patient-specific answers use uploaded patient information only. This is not medical advice, diagnosis, or insulin-dosing guidance. Follow your care plan and consult your clinician.</div>
+        <p><em>✨ Patient-specific answers are grounded in available uploaded data or model output.</em></p>
+      </div></div>
+    </div>`;
+
+  thread?.addEventListener('click', async (event) => {
+    const copyButton = event.target.closest('[data-copy-prompt]');
+    if (!copyButton) return;
+    const promptText = copyButton.closest('.agent-msg')?.querySelector('.msg-body')?.innerText?.trim();
+    if (!promptText) return;
+    try {
+      await navigator.clipboard.writeText(promptText);
+      copyButton.setAttribute('aria-label', 'Prompt copied');
+      copyButton.innerHTML = '<i data-lucide="check" aria-hidden="true"></i><span>Copied</span>';
+      paintIcons();
+      window.setTimeout(() => {
+        if (!copyButton.isConnected) return;
+        copyButton.setAttribute('aria-label', 'Copy prompt');
+        copyButton.innerHTML = '<i data-lucide="copy" aria-hidden="true"></i><span>Copy</span>';
+        paintIcons();
+      }, 1600);
+    } catch {
+      showToast('Could not copy this prompt. Select its text and copy it manually.', 'warn');
+    }
+  });
+
+  const syncAgentContextUi = () => {
+    const available = hasUploadedPatientContext();
+    const upload = state.lastUploadForecast;
+    // The backend issues a fresh opaque ID on every upload request. Use the
+    // stable content key so re-running another horizon for the same readings
+    // keeps the current conversation and its context intact.
+    const contextId = available ? (upload.dataset_context_key || upload.agent_dataset_id || '') : '';
+
+    if (contextId !== activeContextId) {
+      const previousSessionId = currentAgentSessionId;
+      if (activeContextId) void api.agentReset(previousSessionId);
+      currentAgentSessionId = 'session_' + Math.random().toString(36).substring(2, 9);
+      activeContextId = contextId;
+      input.value = '';
+      input.style.height = 'auto';
+      updateClearButton();
+      suggestionChosen = false;
+      if (suggestionsPanel) suggestionsPanel.hidden = true;
+      suggestionsToggle?.setAttribute('aria-expanded', 'false');
+      if (stickyDisclaimer) stickyDisclaimer.hidden = true;
+      if (thread) thread.innerHTML = introMessage();
+    }
+
+    const status = $('#agentContextStatus');
+    if (status) {
+      status.classList.toggle('is-ready', available);
+      status.innerHTML = available
+        ? `<i data-lucide="file-check-2" aria-hidden="true"></i><span><strong>Uploaded patient context active.</strong> ${esc(state.lastUploadFileName || 'CSV upload')} · ${upload.readings.length} CGM readings. Demo and test data are excluded.</span>`
+        : '<i data-lucide="info" aria-hidden="true"></i><span><strong>No upload done yet.</strong> Patient context cannot be determined. Upload a patient CSV to enable the agent.</span>';
+    }
+
+    input.disabled = !available;
+    input.placeholder = available
+      ? 'Ask about the uploaded patient’s glucose history and forecast...'
+      : 'Upload a patient CSV to determine context and enable the agent.';
+    sendBtn.disabled = !available;
+    if (suggestionsToggle) suggestionsToggle.disabled = !available;
+    $all('[data-agent-prompt]').forEach((chip) => { chip.disabled = !available; });
+    if (!available && suggestionsPanel) suggestionsPanel.hidden = true;
+    if (status) paintIcons();
+  };
+
+  document.addEventListener('agent-upload-context-change', syncAgentContextUi);
 
   const autoResizeInput = () => {
     if (!input) return;
@@ -2890,6 +3054,7 @@ function bindAgentChat() {
   const updateClearButton = () => {
     if (clearBtn) clearBtn.hidden = !input.value;
   };
+  syncAgentContextUi();
 
   const setChatExpanded = (expanded) => {
     chatCard?.classList.toggle('is-expanded', expanded);
@@ -2964,31 +3129,8 @@ function bindAgentChat() {
         suggestionChosen = false;
         if (suggestionsPanel) suggestionsPanel.hidden = true;
         suggestionsToggle?.setAttribute('aria-expanded', 'false');
-        thread.innerHTML = `
-          <div class="agent-msg assistant">
-            <div class="msg-avatar"><i data-lucide="bot"></i></div>
-            <div class="msg-content">
-              <div class="msg-body">
-                <p>Hello! I am your <strong>T1D Forecasting &amp; Wellness Assistant</strong>, powered by Groq (<code>openai/gpt-oss-120b</code>) and your calibrated OhioT1DM XGBoost models.</p>
-                <p>I can analyze your blood glucose trajectory across 30, 60, 90, and 120-minute horizons, and provide rich, in-depth guidance on:</p>
-                <ul>
-                  <li><strong>🥗 Meal Data &amp; Nutrition Strategy:</strong> Low-GI carbohydrate pacing, protein/fiber pairing, and practical meal plans to keep glucose in range.</li>
-                  <li><strong>🏃 Workout &amp; Physical Activity Routines:</strong> Safe aerobic and resistance routines, pre-workout checks, and exercise pacing for steady glucose.</li>
-                  <li><strong>⚡ Immediate Hypo Triage (&lt;70 or &lt;54 mg/dL):</strong> Step-by-step <em>Rule of 15</em> fast-acting carb recovery and critical severe hypo protocols.</li>
-                  <li><strong>💧 Immediate Hyper Triage (&gt;180 or &gt;250 mg/dL):</strong> Aggressive hydration, ketone testing protocols, and exercise safety warnings.</li>
-                </ul>
-                <div class="agent-welcome-disclaimer" id="agentWelcomeDisclaimer">
-                  <div class="disclaimer-header">
-                    <i data-lucide="shield-check"></i>
-                    <strong>Clinical Research Disclaimer</strong>
-                  </div>
-                  <p>This is an investigational decision-support research prototype calibrated on OhioT1DM patient data. Predictions are strictly CGM-based (no insulin or meal data). It does not provide medical advice, diagnosis, or insulin dosing recommendations. Always consult your diabetes care team before altering your care plan.</p>
-                </div>
-                <p><em>Every number I state is strictly grounded in real model tool runs. Ask any question below to get started!</em></p>
-              </div>
-            </div>
-          </div>
-        `;
+        thread.innerHTML = introMessage();
+        syncAgentContextUi();
         paintIcons();
         showToast('Conversation reset', 'info');
       } catch (err) {
@@ -3003,6 +3145,10 @@ function bindAgentChat() {
     event.preventDefault();
     const query = input.value.trim();
     if (!query || sendBtn.disabled) return;
+    if (!hasUploadedPatientContext()) {
+      syncAgentContextUi();
+      return;
+    }
 
     if (suggestionChosen) {
       suggestionsPanel.hidden = true;
@@ -3016,8 +3162,9 @@ function bindAgentChat() {
 
     const userMsgEl = document.createElement('div');
     userMsgEl.className = 'agent-msg user';
-    userMsgEl.innerHTML = `<div class="msg-body">${esc(query)}</div>`;
+    userMsgEl.innerHTML = `<div class="msg-body">${esc(query)}</div><button type="button" class="agent-copy-btn" data-copy-prompt aria-label="Copy prompt"><i data-lucide="copy" aria-hidden="true"></i><span>Copy</span></button>`;
     thread.appendChild(userMsgEl);
+    paintIcons();
     input.value = '';
     input.style.height = 'auto';
     updateClearButton();
@@ -3033,12 +3180,14 @@ function bindAgentChat() {
     sendBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
 
     const startTime = performance.now();
+    const requestSessionId = currentAgentSessionId;
     try {
-      const data = await api.agentChat(query, currentAgentSessionId);
+      const data = await api.agentChat(query, requestSessionId);
+      if (requestSessionId !== currentAgentSessionId) return;
 
       const elapsed = performance.now() - startTime;
-      if (elapsed < 900) {
-        await sleep(900 - elapsed);
+      if (elapsed < 2000) {
+        await sleep(2000 - elapsed);
       }
 
       const assistantMsgEl = document.createElement('div');
@@ -3053,6 +3202,7 @@ function bindAgentChat() {
       paintIcons();
       thread.scrollTop = thread.scrollHeight;
     } catch (error) {
+      if (requestSessionId !== currentAgentSessionId) return;
       let errorNotice = esc(error.message || 'Unknown network error');
       if (error.status === 429) {
         errorNotice = 'Groq rate limit reached (429). Please wait a few seconds before asking another question.';
@@ -3065,7 +3215,7 @@ function bindAgentChat() {
       errorMsgEl.innerHTML = `
         <div class="msg-avatar" style="border-color: rgba(248, 113, 113, 0.4); color: var(--bad);"><i data-lucide="alert-octagon"></i></div>
         <div class="msg-content">
-          <div class="msg-body" style="border-color: rgba(248, 113, 113, 0.4); background: rgba(50, 20, 24, 0.8);">
+          <div class="msg-body" style="border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: var(--panel-2); color: var(--text);">
             <p><strong style="color: var(--bad);">Could not complete request:</strong> ${errorNotice}</p>
           </div>
         </div>
@@ -3074,8 +3224,9 @@ function bindAgentChat() {
       paintIcons();
       thread.scrollTop = thread.scrollHeight;
     } finally {
+      if (requestSessionId !== currentAgentSessionId) return;
       if (typing) typing.hidden = true;
-      sendBtn.disabled = false;
+      sendBtn.disabled = !hasUploadedPatientContext();
       sendBtn.removeAttribute('aria-busy');
       sendBtn.innerHTML = '<i data-lucide="send" aria-hidden="true"></i><span>Send</span>';
       paintIcons();

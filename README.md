@@ -1,6 +1,19 @@
 # Glucose Horizon
 
+<<<<<<< HEAD
 Glucose Horizon is a multi horizon blood-glucose forecasting project for Type 1 diabetes. It includes a FastAPI backend and a browser dashboard. Forecast horizons are 30, 60, 90, and 120 minutes.
+=======
+## Interface and patient-context updates (2026-11-19)
+
+- The dashboard uses a light warm-white, navy, coral, marigold, and sky palette with DM Sans typography, responsive layouts, compact cards, and chart color conventions.
+- Sidebar navigation has layered depth, animated active and hover states, staggered entrance motion, and reduced-motion support. Cursor particles use a softly luminous blue and remain behind page content.
+- Test Explorer presents OhioT1DM and SimGlucose panels with matching layout, context metrics, typography, and forecast loading animations. The Overview risk cards have additional spacing and responsive typography.
+- CSV upload supports all horizons or one horizon at a time. It shows matching predictions and EGA; when all horizons are selected, Clinical Analysis provides an EGA horizon selector. Repeated uploads of the same readings accumulate selected horizons for the Forecast Agent.
+- Forecast Agent patient context comes only from an active uploaded CSV. It can query uploaded measurements, including timestamped readings when present, but cannot access code or unrelated project information. It only reports uploaded forecast horizons and must not generate missing forecasts. Forecast times are reported as forecast origin plus horizon, preserving the dataset timezone.
+- Agent replies have a two-second minimum display delay, submitted prompts have a Copy action, and the welcome message describes its capabilities. Immediate or personal hypoglycemia-plan requests receive concise, non-prescriptive safety guidance rather than a step-by-step treatment regimen.
+
+Glucose Horizon is a multi-horizon blood-glucose forecasting project for Type 1 diabetes. It includes a FastAPI backend and a browser dashboard. Forecast horizons are 30, 60, 90, and 120 minutes.
+>>>>>>> upstream/main
 
 The app has two prediction paths:
 

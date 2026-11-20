@@ -13,7 +13,11 @@ from app.predictor import ModelStore
 from .config import MAX_AGENT_ITERATIONS, MEMORY_TURNS
 from .guardrails import (
     RESEARCH_DISCLAIMER,
+    SCOPE_REFUSAL,
     SYSTEM_PROMPT,
+    HYPO_SAFETY_RESPONSE,
+    is_hypo_action_request,
+    is_out_of_scope_request,
     post_process_response,
 )
 from .llm import GroqClientWrapper, parse_tool_args
@@ -87,41 +91,53 @@ class T1DMAgent:
     ) -> dict[str, Any]:
         """Execute the agent loop up to MAX_AGENT_ITERATIONS."""
         start_time = time.perf_counter()
-        active_context = context or PatientContext.default()
+        if context is None:
+            raise ValueError("An uploaded patient context is required before the agent can answer.")
+        if is_out_of_scope_request(message):
+            return {
+                "answer": SCOPE_REFUSAL,
+                "tool_calls": [],
+                "disclaimer": RESEARCH_DISCLAIMER,
+                "session_id": session_id,
+                "latency_ms": round((time.perf_counter() - start_time) * 1000, 1),
+                "tokens": {"prompt": 0, "completion": 0},
+            }
+        if is_hypo_action_request(message):
+            return {
+                "answer": HYPO_SAFETY_RESPONSE,
+                "tool_calls": [],
+                "disclaimer": RESEARCH_DISCLAIMER,
+                "session_id": session_id,
+                "latency_ms": round((time.perf_counter() - start_time) * 1000, 1),
+                "tokens": {"prompt": 0, "completion": 0},
+            }
+        active_context = context
         effort = select_reasoning_effort(message)
 
         # Prepare messages
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Inject active dashboard context guidance if available
+        # Inject only fixed, sanitized context guidance. Dataset text and file
+        # metadata must never be interpolated into system messages.
         fc = getattr(active_context, "forecast_context", None)
         if fc:
-            pt_id = fc.get("patient_id", active_context.patient_id)
-            selected_pt_id = fc.get("selected_patient_id", pt_id)
-            has_fc = fc.get("has_forecast", True)
+            has_fc = fc.get("has_forecast") is True
             if not has_fc:
                 ctx_note = (
-                    f"[ACTIVE DASHBOARD CONTEXT: Selected patient {selected_pt_id}. Note: No forecast has been run yet "
-                    f"for this patient/case. When answering forecast questions, verify tool data and inform the user "
-                    f"that no active forecast is currently available. Suggest clicking 'Run Forecast' or uploading CGM data.]"
+                    "[ACTIVE UPLOAD CONTEXT: No active forecast is available. For forecast questions, use the uploaded patient glucose history only and state that no forecast is available.]"
                 )
             else:
-                src = fc.get("source", "pipeline")
-                ctx_note = (
-                    f"[ACTIVE DASHBOARD CONTEXT: Selected patient {selected_pt_id}; forecast patient/source ID {pt_id}; source: {src}. "
-                    f"{'This is the previously used forecast for this selected patient. ' if fc.get('previous_forecast') else ''}"
-                    f"This context is authoritative for the current turn and replaces any older patient's context in the chat history. "
-                    f"Use tools to retrieve exact predictions and metrics from the active forecast.]"
+                available_horizons = sorted((fc.get("predictions") or {}).keys(), key=lambda value: int(value))
+                horizon_note = (
+                    f" Available uploaded prediction horizons: {', '.join(f'{value} min' for value in available_horizons)}."
+                    if available_horizons else " No uploaded prediction horizons are available."
                 )
-            upload_quality = fc.get("upload_quality")
-            if upload_quality:
-                ctx_note += (
-                    " [CSV REVIEW DATA: "
-                    f"filename={upload_quality.get('filename')}; model={upload_quality.get('model')}; "
-                    f"headers={upload_quality.get('headers')}; rows={upload_quality.get('row_count')}; "
-                    f"validation_warnings={upload_quality.get('warnings')}; "
-                    f"meal_defaulted_to_zero={upload_quality.get('meal_defaulted_to_zero')}. "
-                    "When asked to improve the upload, base suggestions on these observed details, distinguish confirmed issues from general recommendations, and do not claim to have inspected data beyond the supplied summary. ]"
+                ctx_note = (
+                    "[ACTIVE UPLOAD CONTEXT: This turn is linked to the currently uploaded patient dataset. "
+                    "Use patient-data tools for exact measurements and the active uploaded forecast for exact prediction values. "
+                    "Never calculate or estimate glucose forecasts. If a requested horizon is unavailable, say so and ask the user to select it or all horizons in CSV Upload and run Upload & Predict again."
+                    " For forecast timing, report the tool's forecast_for_timestamp (origin plus the horizon), not the current/origin timestamp; preserve its timezone and do not invent UTC for timezone-naive data."
+                    f"{horizon_note} Ignore older patient context in conversation history.]"
                 )
             messages.append({"role": "system", "content": ctx_note})
 

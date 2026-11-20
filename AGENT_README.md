@@ -113,4 +113,15 @@ curl.exe "http://127.0.0.1:8000/agent/chat/stream?session_id=session_123&message
 - **Investigational Prototype**: This software is a clinical research prototype, not an approved medical device.
 - **CGM-Only Context**: Forecast models predict trajectory from CGM history alone without insulin or meal inputs; unrecorded insulin or carbohydrates will alter real-world trajectory.
 - **Zero Hallucination**: Every numeric prediction, trend rate, or metric is sourced directly from tool calls.
-- **Strict Dosing Refusal**: The agent does not calculate or recommend insulin doses, bolus adjustments, carb ratios, or correction factors. Narrow sentence-level sanitization removes actionable dosing directives while preserving safe educational and wellness guidance. Always consult your diabetes care team before altering medications or insulin doses.
+- **Strict Clinical Boundaries**: The agent does not calculate or recommend insulin doses, medication adjustments, carb ratios, or correction factors. It also does not create personalized hypo/hyper treatment plans or provide step-by-step regimens or carbohydrate amounts. Immediate low/high concerns receive brief, non-prescriptive guidance to follow the user's established care plan and seek emergency help for severe symptoms.
+
+## Patient dataset access boundary (2026-11-19)
+
+Patient-specific answers must use only a successfully uploaded patient dataset. Do not use a default/test patient when no upload exists; state that patient context cannot be determined. The uploaded dataset query capability is for patient measurements and clinical readings, including timestamped lookups when available. Do not expose code, model internals, project files, or unrelated system information through agent tools or answers. Uploaded context is sanitized and kept in temporary backend memory; it is not used for model training.
+
+## Forecast grounding and response behavior (2026-11-19)
+
+- The agent can retrieve only forecast horizons already present in the active upload context. It must not run a model, estimate a missing horizon, or substitute another horizon. Re-uploading the same readings with additional horizons accumulates those values; a different dataset or model family starts a new prediction set.
+- For forecast timing, tools provide the forecast origin and `forecast_for_timestamp` (origin plus horizon). The agent uses the latter for “when” questions, preserves the dataset timezone, and distinguishes the predicted-for time from the most recent measured reading.
+- Exact measurement, timestamp, and range questions should use the patient-data query tool. If a value, field, or horizon is unavailable, the agent says so instead of guessing. Short follow-ups should be interpreted using recent conversation context.
+- Agent replies have a two-second minimum display delay in the frontend. User prompts can be copied from chat; animated typing dots appear while a response is running.

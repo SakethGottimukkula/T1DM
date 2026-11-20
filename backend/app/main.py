@@ -34,6 +34,7 @@ from .features import FEATURE_COLUMNS, build_features, build_features_single
 from .predictor import ModelStore
 from .wellness import get_wellness_suggestion
 from agent.router import router as agent_router
+from agent.patient_data import patient_dataset_store
 from .simglucose_features import SIM_FEATURE_COLUMNS, build_sim_features
 from .schemas import (
     BacktestResponse,
@@ -293,6 +294,7 @@ async def predict_simglucose_csv(file: UploadFile = File(...), horizon: str = Fo
     df = df.dropna(subset=["timestamp", "cgm", "bg", "insulin"]).sort_values("timestamp")
     duplicate_timestamps = int(df["timestamp"].duplicated(keep="last").sum())
     df = df.drop_duplicates("timestamp", keep="last").set_index("timestamp")
+    patient_dataset = df.reset_index().copy()
     df = df.resample("5min").agg({"cgm": "mean", "bg": "mean", "insulin": "sum", "cho": "sum"}).dropna(subset=["cgm", "bg"])
     if len(df) < MIN_HISTORY:
         raise HTTPException(422, f"At least {MIN_HISTORY} valid 5-minute readings are required. Got {len(df)}.")
@@ -332,8 +334,11 @@ async def predict_simglucose_csv(file: UploadFile = File(...), horizon: str = Fo
             "predicted": [round(float(value), 2) for value in predicted[::stride]],
         }
     history = feature_df.tail(48)[["timestamp", "cgm"]].rename(columns={"cgm": "glucose"})
+    agent_dataset_id, agent_dataset_rows, agent_dataset_columns = patient_dataset_store.register(patient_dataset)
     return {"predictions": predictions, "latest_glucose": latest, "timestamp": str(last["timestamp"]),
             "meal_defaulted_to_zero": meal_defaulted, "headers": csv_headers, "row_count": raw_row_count,
+            "agent_dataset_id": agent_dataset_id, "agent_dataset_rows": agent_dataset_rows,
+            "agent_dataset_columns": agent_dataset_columns,
             "readings": [{"timestamp": str(row.timestamp), "glucose": round(float(row.glucose), 2)} for row in history.itertuples(index=False)],
             "evaluation": evaluation,
             "warnings": {"invalid_rows_dropped": invalid_rows, "duplicate_timestamps_removed": duplicate_timestamps,
@@ -522,6 +527,7 @@ async def predict_csv(
         raise HTTPException(422, f"patient_id '{patient_id}' not found. Available: {patients_available}")
     patient_used = patient_id if patient_id is not None else str(patients_available[0])
     df = df[df["patient_id"].astype(str) == patient_used].sort_values("timestamp").reset_index(drop=True)
+    patient_dataset = df.drop(columns=["patient_id"], errors="ignore").copy()
     eval_rows = df.copy()
     warnings = {"gaps_outside_3_7_minutes": 0}
     tail_count = 25
@@ -580,6 +586,7 @@ async def predict_csv(
             "predicted": [round(float(value), 2) for value in predicted[::stride]],
         }
 
+    agent_dataset_id, agent_dataset_rows, agent_dataset_columns = patient_dataset_store.register(patient_dataset)
     return {
         "predictions": [pred.model_dump() for pred in preds],
         "latest_glucose": latest_glucose,
@@ -589,6 +596,9 @@ async def predict_csv(
         "warnings": warnings,
         "headers": csv_headers,
         "row_count": raw_row_count,
+        "agent_dataset_id": agent_dataset_id,
+        "agent_dataset_rows": agent_dataset_rows,
+        "agent_dataset_columns": agent_dataset_columns,
         "readings": [
             {"timestamp": str(row.timestamp), "glucose": round(float(row.glucose), 2)}
             for row in tail[["timestamp", "glucose"]].itertuples(index=False)

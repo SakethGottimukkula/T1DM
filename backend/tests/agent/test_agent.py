@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
@@ -48,6 +49,7 @@ from agent.tools import (
     tool_get_model_performance,
     tool_get_recent_glucose,
 )
+from agent.patient_data import patient_dataset_store
 from app.main import app
 from app.predictor import ModelStore
 
@@ -61,7 +63,27 @@ def model_store():
 
 @pytest.fixture
 def default_context():
-    return PatientContext.default()
+    return uploaded_test_context()
+
+
+def uploaded_test_context(forecast_context=None):
+    base = datetime(2026, 1, 1, 8, 0)
+    readings = [
+        {"timestamp": (base + timedelta(minutes=5 * index)).isoformat(), "glucose": 120.0 + index / 2}
+        for index in range(30)
+    ]
+    return PatientContext.from_readings(readings, forecast_context=forecast_context)
+
+
+def register_uploaded_test_dataset():
+    import pandas as pd
+
+    frame = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01 08:00", periods=30, freq="5min"),
+        "glucose": [120.0 + index / 2 for index in range(30)],
+    })
+    token, _, _ = patient_dataset_store.register(frame)
+    return token
 
 
 @pytest.fixture
@@ -291,7 +313,10 @@ class TestAgentRouter:
 
     def test_agent_chat_missing_key_returns_503(self, client, monkeypatch):
         monkeypatch.setattr("agent.router.GROQ_API_KEY", "")
-        r = client.post("/agent/chat", json={"session_id": "s1", "message": "What is my forecast?"})
+        r = client.post("/agent/chat", json={
+            "session_id": "s1", "message": "What is my forecast?",
+            "agent_dataset_id": register_uploaded_test_dataset(),
+        })
         assert r.status_code == 503
 
     def test_agent_chat_mocked_end_to_end(self, client, monkeypatch, model_store):
@@ -325,7 +350,10 @@ class TestAgentRouter:
 
             r = client.post(
                 "/agent/chat",
-                json={"session_id": "test_e2e_session", "message": "What will my glucose be in 60 minutes?"},
+                json={
+                    "session_id": "test_e2e_session", "message": "What will my glucose be in 60 minutes?",
+                    "agent_dataset_id": register_uploaded_test_dataset(),
+                },
             )
             assert r.status_code == 200
             data = r.json()
@@ -383,7 +411,7 @@ class TestAgentRouter:
                 json={
                     "session_id": "test_fc_session",
                     "message": "What is my 60-minute forecast?",
-                    "patient_id": "559",
+                    "agent_dataset_id": register_uploaded_test_dataset(),
                     "forecast_context": forecast_context,
                 },
             )
@@ -394,8 +422,8 @@ class TestAgentRouter:
             assert tc_result["predicted_glucose_mg_dl"] == 155.0
             assert tc_result["current_glucose_mg_dl"] == 140.0
             assert tc_result["change_mg_dl"] == 15.0
-            assert tc_result["actual_held_out_glucose_mg_dl"] == 152.0
-            assert tc_result["clarke_zone"] == "A"
+            assert "actual_held_out_glucose_mg_dl" not in tc_result
+            assert "clarke_zone" not in tc_result
 
 
 # ===========================================================================
@@ -405,7 +433,7 @@ class TestAgentRouter:
 class TestForecastContextTools:
     def test_tool_get_forecast_no_forecast_run(self, model_store):
         """When has_forecast is False, tool reports no forecast is available."""
-        context = PatientContext.default(forecast_context={"has_forecast": False, "patient_id": "559"})
+        context = uploaded_test_context(forecast_context={"has_forecast": False, "patient_id": "559"})
         res = tool_get_forecast({"horizon_min": 60}, context, model_store)
         assert res["status"] == "no_forecast_available"
         assert res["has_forecast"] is False
@@ -422,7 +450,7 @@ class TestForecastContextTools:
                 "60": {"predicted": 150.0, "change": 15.0, "actual": 148.0, "error": 2.0, "clarke_zone": "A"},
             },
         }
-        context = PatientContext.default(forecast_context=fc)
+        context = uploaded_test_context(forecast_context=fc)
         res30 = tool_get_forecast({"horizon_min": 30}, context, model_store)
         assert res30["predicted_glucose_mg_dl"] == 142.5
         assert res30["current_glucose_mg_dl"] == 135.0
@@ -432,7 +460,7 @@ class TestForecastContextTools:
 
     def test_tool_get_all_forecasts_no_forecast_run(self, model_store):
         """When has_forecast is False, get_all_forecasts returns empty forecasts list and status."""
-        context = PatientContext.default(forecast_context={"has_forecast": False, "patient_id": "559"})
+        context = uploaded_test_context(forecast_context={"has_forecast": False, "patient_id": "559"})
         res = tool_get_all_forecasts({}, context, model_store)
         assert res["status"] == "no_forecast_available"
         assert res["has_forecast"] is False
@@ -445,7 +473,7 @@ class TestForecastContextTools:
             "patient_id": "559",
             "patient_rmse": {"30": 11.2, "60": 15.4, "90": 19.8, "120": 22.1},
         }
-        context = PatientContext.default(forecast_context=fc)
+        context = uploaded_test_context(forecast_context=fc)
         res60 = tool_get_model_performance({"horizon_min": 60}, context, model_store)
         assert res60["patient_id"] == "559"
         assert res60["patient_specific_rmse_mg_dl"] == 15.4
