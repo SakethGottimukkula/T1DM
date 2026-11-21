@@ -7,8 +7,10 @@
    predicted, actual, horizon, error, clarke_zone, and context.
    ============================================================================= */
 
-const API_BASE_URL = 'https://t1dm-x8ec.onrender.com';
-
+const API_BASE_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:8000'
+  : 'https://t1dm-x8ec.onrender.com';
+  
 const ENDPOINTS = {
   health: '/health',
   patients: '/v1/patients',
